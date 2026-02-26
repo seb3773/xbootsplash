@@ -20,8 +20,8 @@ generate_delta_v2            GCC -nostdlib              Frame buffer
        │                           │                          │
        ├── PNG → RGB565            ├── nolibc.h               │
        ├── XOR delta               └── frames_delta.h         │
-       └── RLE encode                        │                 │
-       │                                     ▼                 │
+       └── RLE encode                        │                │
+       │                                     ▼                │
        ▼                           xbootsplash (74KB)         │
 frames_delta.h                           │                    │
                                          ▼                    ▼
