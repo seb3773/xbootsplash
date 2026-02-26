@@ -175,9 +175,9 @@ install_standard() {
     # Create hook script
     echo -e "${GREEN}[1/4] Creating initramfs-tools hook...${NC}"
     mkdir -p /etc/initramfs-tools/hooks
-    cat > /etc/initramfs-tools/hooks/splash_anim << 'HOOK_EOF'
+    cat > /etc/initramfs-tools/hooks/xbootsplash << 'HOOK_EOF'
 #!/bin/sh
-# initramfs-tools hook for bootsplash animation
+# initramfs-tools hook for xbootsplash animation
 
 PREREQ=""
 prereqs() { echo "$PREREQ"; }
@@ -186,28 +186,28 @@ case "$1" in prereqs) prereqs; exit 0;; esac
 . /usr/share/initramfs-tools/hook-functions
 
 # Copy binary
-copy_file binary /sbin/splash_anim /sbin/splash_anim
+copy_file binary /sbin/xbootsplash /sbin/xbootsplash
 
 # Ensure framebuffer device
 if [ ! -e "${DESTDIR}/dev/fb0" ]; then
     mknod "${DESTDIR}/dev/fb0" c 29 0 2>/dev/null || true
 fi
 HOOK_EOF
-    chmod +x /etc/initramfs-tools/hooks/splash_anim
-    echo "  -> /etc/initramfs-tools/hooks/splash_anim"
+    chmod +x /etc/initramfs-tools/hooks/xbootsplash
+    echo "  -> /etc/initramfs-tools/hooks/xbootsplash"
     
     # Copy binary to /sbin
     echo -e "${GREEN}[2/4] Installing binary to /sbin...${NC}"
-    cp "$BINARY" /sbin/splash_anim
-    chmod +x /sbin/splash_anim
-    echo "  -> /sbin/splash_anim"
+    cp "$BINARY" /sbin/xbootsplash
+    chmod +x /sbin/xbootsplash
+    echo "  -> /sbin/xbootsplash"
     
     # Create init-top script (starts splash early)
     echo -e "${GREEN}[3/4] Creating init-top script...${NC}"
     mkdir -p /etc/initramfs-tools/scripts/init-top
-    cat > /etc/initramfs-tools/scripts/init-top/splash_anim << 'INIT_TOP_EOF'
+    cat > /etc/initramfs-tools/scripts/init-top/xbootsplash << 'INIT_TOP_EOF'
 #!/bin/sh
-# Start bootsplash animation early in boot
+# Start xbootsplash animation early in boot
 # This runs after /dev is mounted, before root filesystem
 
 PREREQ="udev"
@@ -217,21 +217,21 @@ case "$1" in prereqs) prereqs; exit 0;; esac
 . /scripts/functions
 
 # Start splash in background
-if [ -x /sbin/splash_anim ]; then
-    /sbin/splash_anim &
+if [ -x /sbin/xbootsplash ]; then
+    /sbin/xbootsplash &
     SPLASH_PID=$!
-    echo "$SPLASH_PID" > /run/splash_anim.pid
+    echo "$SPLASH_PID" > /run/xbootsplash.pid
 fi
 INIT_TOP_EOF
-    chmod +x /etc/initramfs-tools/scripts/init-top/splash_anim
-    echo "  -> /etc/initramfs-tools/scripts/init-top/splash_anim"
+    chmod +x /etc/initramfs-tools/scripts/init-top/xbootsplash
+    echo "  -> /etc/initramfs-tools/scripts/init-top/xbootsplash"
     
     # Create init-bottom script (stops splash before switch_root)
     echo -e "${GREEN}[4/4] Creating init-bottom script...${NC}"
     mkdir -p /etc/initramfs-tools/scripts/init-bottom
-    cat > /etc/initramfs-tools/scripts/init-bottom/splash_anim << 'INIT_BOTTOM_EOF'
+    cat > /etc/initramfs-tools/scripts/init-bottom/xbootsplash << 'INIT_BOTTOM_EOF'
 #!/bin/sh
-# Stop bootsplash before switching to real root
+# Stop xbootsplash before switching to real root
 
 PREREQ=""
 prereqs() { echo "$PREREQ"; }
@@ -240,9 +240,9 @@ case "$1" in prereqs) prereqs; exit 0;; esac
 . /scripts/functions
 
 # Stop splash animation
-if [ -f /run/splash_anim.pid ]; then
-    kill $(cat /run/splash_anim.pid) 2>/dev/null || true
-    rm -f /run/splash_anim.pid
+if [ -f /run/xbootsplash.pid ]; then
+    kill $(cat /run/xbootsplash.pid) 2>/dev/null || true
+    rm -f /run/xbootsplash.pid
 fi
 
 # Clear framebuffer to black before handoff
@@ -250,8 +250,8 @@ if [ -c /dev/fb0 ]; then
     dd if=/dev/zero of=/dev/fb0 2>/dev/null || true
 fi
 INIT_BOTTOM_EOF
-    chmod +x /etc/initramfs-tools/scripts/init-bottom/splash_anim
-    echo "  -> /etc/initramfs-tools/scripts/init-bottom/splash_anim"
+    chmod +x /etc/initramfs-tools/scripts/init-bottom/xbootsplash
+    echo "  -> /etc/initramfs-tools/scripts/init-bottom/xbootsplash"
     
     # Rebuild initramfs
     if [[ "$REBUILD" == true ]]; then
@@ -265,21 +265,44 @@ INIT_BOTTOM_EOF
         echo "Run manually: sudo update-initramfs -u"
     fi
     
+    # Check framebuffer availability
+    echo ""
+    echo -e "${GREEN}Checking framebuffer...${NC}"
+    if [[ -e /dev/fb0 ]]; then
+        echo "  -> /dev/fb0 exists (OK)"
+    else
+        echo -e "  -> ${YELLOW}/dev/fb0 not found${NC}"
+        echo "     Framebuffer may not be active. You might need to:"
+        echo "     1. Add 'video=efifb' or 'video=vesafb' to kernel cmdline"
+        echo "     2. Remove 'nomodeset' from kernel cmdline"
+    fi
+    
+    # Offer to update GRUB
+    if command -v update-grub &>/dev/null; then
+        echo ""
+        read -p "Run update-grub now? [Y/n] " -n 1 -r
+        echo ""
+        if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+            echo -e "${GREEN}Updating GRUB...${NC}"
+            update-grub
+            echo "  -> Done"
+        fi
+    fi
+    
     echo ""
     echo -e "${GREEN}=== Installation Complete (Standard Method) ===${NC}"
     echo ""
     echo "Files installed:"
-    echo "  /sbin/splash_anim"
-    echo "  /etc/initramfs-tools/hooks/splash_anim"
-    echo "  /etc/initramfs-tools/scripts/init-top/splash_anim"
-    echo "  /etc/initramfs-tools/scripts/init-bottom/splash_anim"
+    echo "  /sbin/xbootsplash"
+    echo "  /etc/initramfs-tools/hooks/xbootsplash"
+    echo "  /etc/initramfs-tools/scripts/init-top/xbootsplash"
+    echo "  /etc/initramfs-tools/scripts/init-bottom/xbootsplash"
     echo ""
     echo "The splash will:"
     echo "  1. Start automatically after /dev is mounted"
     echo "  2. Stop before switch_root (clean handoff)"
     echo "  3. Persist across kernel updates"
     echo ""
-    echo "No bootloader configuration required."
     echo "Reboot to see the splash animation."
 }
 
@@ -312,9 +335,9 @@ install_custom() {
     
     # Copy binary
     echo -e "${GREEN}[1/3] Copying binary...${NC}"
-    cp "$BINARY" "$INITRAMFS_DIR/sbin/splash_anim"
-    chmod +x "$INITRAMFS_DIR/sbin/splash_anim"
-    echo "  -> $INITRAMFS_DIR/sbin/splash_anim"
+    cp "$BINARY" "$INITRAMFS_DIR/sbin/xbootsplash"
+    chmod +x "$INITRAMFS_DIR/sbin/xbootsplash"
+    echo "  -> $INITRAMFS_DIR/sbin/xbootsplash"
     
     # Create framebuffer device
     echo -e "${GREEN}[2/3] Creating device nodes...${NC}"
@@ -333,7 +356,7 @@ install_custom() {
         echo -e "${YELLOW}IMPORTANT: You must add the following to your init script:${NC}"
         echo ""
         echo "  # After mounting /dev:"
-        echo "  /sbin/splash_anim &"
+        echo "  /sbin/xbootsplash &"
         echo "  SPLASH_PID=\$!"
         echo ""
         echo "  # Before switch_root:"
@@ -357,7 +380,7 @@ mount -t devtmpfs devtmpfs /dev 2>/dev/null || {
 }
 
 # Start bootsplash
-/sbin/splash_anim &
+/sbin/xbootsplash &
 SPLASH_PID=$!
 
 # --- CUSTOMIZE HERE ---
