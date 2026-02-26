@@ -25,16 +25,16 @@ generate_delta_v2            GCC -nostdlib              Frame buffer
        ▼                           xbootsplash (74KB)         │
 frames_delta.h                           │                    │
                                          ▼                    ▼
-                                    Load frame 0 ───────► Blit
+                                    Load frame 0 ─────────► Blit
                                          │                    │
                                          ▼                    ▼
-                                    Apply XOR delta ─────► Blit
+                                    Apply XOR delta ──────► Blit
                                          │                    │
                                          ▼                    ▼
-                                    nanosleep(33ms) ◄────────┘
+                                    nanosleep(33ms) ◄─────────┘
 ```
 
-## Design Decisions
+## Design:
 
 ### 1. No Libc
 
