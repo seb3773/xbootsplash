@@ -200,7 +200,6 @@ Larger frames = larger binary:
 1. x86_64 only (syscall numbers)
 2. No alpha blending (black background)
 3. No scaling
-4. No audio
 
 ## Porting (ARM64)
 
