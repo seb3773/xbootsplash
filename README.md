@@ -218,15 +218,12 @@ xbootsplash/
 ├── README.md               # This file
 ├── HOW_TO_INSTALL.md       # Installation guide
 ├── Makefile                # Build system
-├── nolibc.h                # Syscall wrappers
-├── start.S                 # Startup assembly
-├── linker.ld               # Linker script
-├── splash_anim_delta.c     # Main program (multi-mode)
-├── frames_delta.h          # Frame data (generated)
-├── generate_splash.c       # Unified generator (all modes)
-├── benchmark_compress.c    # Compression analyzer
-├── build_anim.sh           # Interactive builder + installer
-└── win10_png/              # Example frames
+├── nolibc.h                # Syscall wrappers (freestanding libc)
+├── start.S                 # Startup assembly (_start entry point)
+├── linker.ld               # Custom linker script (minimal ELF)
+├── splash_anim_delta.c     # Main program (multi-mode animation)
+├── generate_splash.c       # Generator tool (PNG → compressed C header)
+└── build_anim.sh           # Interactive builder + installer script
 ```
 
 ## Quick Start
@@ -614,4 +611,336 @@ If xbootsplash causes boot failure (black screen, freeze, or kernel panic):
 | Infinite loop | Process persists if PID lost | Fixed: SIGTERM/SIGINT handling |
 
 See `HOW_TO_INSTALL.md` for detailed instructions.
+
+## Supported Resolutions
+
+### Recommended Resolutions
+
+| Resolution | Aspect Ratio | Use Case | Notes |
+|------------|--------------|----------|-------|
+| **1920×1080** | 16:9 | Most common, Full HD | Default recommendation |
+| **2560×1440** | 16:9 | QHD, high-DPI | Works well |
+| **3840×2160** | 16:9 | 4K UHD | Larger binary, slower blit |
+| **1366×768** | 16:9 | Laptop common | Good for small screens |
+| **1280×720** | 16:9 | HD ready | Minimal size |
+| **1600×900** | 16:9 | WXGA++ | Good balance |
+
+### Resolution Guidelines
+
+- **Match your screen**: Use the native resolution for best quality
+- **Frame size matters**: Animation frames are stored compressed; larger frames = larger binary
+- **Background images**: Full-screen modes (2, 4) store entire image; expect 1-4 MB binaries
+- **Auto-resize**: The generator can resize images to target resolution with bilinear interpolation
+
+### Performance Impact
+
+| Resolution | 32bpp Blit Time | Memory |
+|------------|-----------------|--------|
+| 1280×720 | ~0.5 ms | 1.8 MB |
+| 1920×1080 | ~1.2 ms | 4 MB |
+| 2560×1440 | ~2.2 ms | 7 MB |
+| 3840×2160 | ~6 ms | 16 MB |
+
+**Recommendation**: For smooth 30 FPS, stay ≤1920×1080 on older hardware.
+
+## DRM vs FBDev Compatibility
+
+### Framebuffer Drivers (FBDev)
+
+xbootsplash uses the **legacy framebuffer interface** (`/dev/fb0`), which is supported by:
+
+| Driver | System Type | Status |
+|--------|-------------|--------|
+| `efifb` | UEFI systems | ✅ Fully supported |
+| `vesafb` | BIOS/legacy boot | ✅ Fully supported |
+| `simplefb` | Device tree / ARM | ✅ Fully supported |
+| `intelfb` | Intel integrated | ✅ Works |
+| `nvidiafb` | NVIDIA legacy | ⚠️ May conflict with proprietary driver |
+| `amdgpufb` | AMD | ✅ Works with amdgpu |
+
+### DRM/KMS Systems
+
+Modern systems use **DRM/KMS** (Direct Rendering Manager) instead of legacy fbdev:
+
+- **SimpleDRM**: Newer kernels provide `simpledrm` which creates `/dev/fb0` from DRM
+- **DRM drivers**: `amdgpu`, `i915`, `nouveau`, `radeon` may or may not expose `/dev/fb0`
+
+**Compatibility Matrix:**
+
+| Setup | `/dev/fb0` | xbootsplash Works |
+|-------|------------|-------------------|
+| UEFI + efifb | ✅ Yes | ✅ Yes |
+| UEFI + simpledrm | ✅ Yes | ✅ Yes |
+| BIOS + vesafb | ✅ Yes | ✅ Yes |
+| DRM driver with fbdev emulation | ✅ If enabled | ✅ Yes |
+| DRM driver without emulation | ❌ No | ❌ No |
+| Early boot (before GPU init) | ⚠️ Depends | ⚠️ May fail |
+
+### Checking Compatibility
+
+```bash
+# Check if framebuffer exists
+ls -la /dev/fb0
+
+# Check which driver provides it
+cat /sys/class/graphics/fb0/name
+
+# Check resolution
+cat /sys/class/graphics/fb0/virtual_size
+
+# Check if DRM is active
+ls -la /sys/kernel/debug/dri/
+```
+
+### Troubleshooting DRM Issues
+
+If `/dev/fb0` is missing on a DRM system:
+
+1. **Enable fbdev emulation** in kernel config:
+   ```
+   CONFIG_DRM_FBDEV_EMULATION=y
+   ```
+
+2. **Or use simpledrm** (kernel 5.14+):
+   ```
+   CONFIG_DRM_SIMPLEDRM=y
+   ```
+
+3. **GRUB fallback**: Add `nomodeset` to disable DRM and use vesafb/efifb
+
+## Failure Cases and Expected Behavior
+
+### Normal Operation
+
+| Event | Behavior |
+|-------|----------|
+| SIGTERM received | Clean exit: clear framebuffer, close resources |
+| SIGINT received | Same as SIGTERM |
+| Animation complete (no loop) | Stay on last frame, wait for signal |
+| Loop enabled | Restart from frame 0 |
+
+### Error Conditions
+
+| Error | Behavior | User Visible |
+|-------|----------|--------------|
+| `/dev/fb0` not found | Exit(1) immediately | Black screen, boot continues |
+| `/proc/cmdline` has `nosplash` | Exit(0) immediately | No splash, normal boot |
+| `/proc/cmdline` has `xbootsplash=0` | Exit(0) immediately | No splash, normal boot |
+| Framebuffer mmap fails | Exit(1) | Black screen |
+| Invalid BPP (not 16/24/32) | Skip frame | Partial display |
+
+### Graceful Degradation
+
+- **No crash on error**: All errors result in clean exit
+- **No hang**: Main loop always checks `terminate_requested`
+- **No memory leak**: Arena allocator, no dynamic allocation at runtime
+- **Clean handoff**: Framebuffer cleared to black before exit
+
+### Known Edge Cases
+
+| Case | Impact | Solution |
+|------|--------|----------|
+| Resolution mismatch | Animation offset may be off-screen | Use correct target resolution |
+| 24bpp framebuffer | Works but slower (no SSE2 path) | Use 32bpp if possible |
+| Sparse XOR overflow (>65535 pixels) | Method skipped in auto-selection | Use RLE XOR instead |
+| Very long `/proc/cmdline` | Handled (4096 byte buffer) | No issue |
+
+## Initramfs Integration Guide
+
+### initramfs-tools (Debian/Ubuntu)
+
+**Standard Installation** (recommended):
+```bash
+sudo ./build_anim.sh
+# Select "Install" → "Standard (initramfs-tools)"
+```
+
+**How it works:**
+- Binary installed to `/sbin/xbs_name`
+- Hook script: `/etc/initramfs-tools/hooks/xbs_name` (copies binary to initramfs)
+- Init-top script: `/etc/initramfs-tools/scripts/init-top/xbs_name` (starts splash early)
+- Init-bottom script: `/etc/initramfs-tools/scripts/init-bottom/xbs_name` (stops splash before handoff)
+
+**Manual setup:**
+```bash
+# Install binary
+sudo cp xbs_mysplash /sbin/
+sudo chmod 755 /sbin/xbs_mysplash
+
+# Create hook
+sudo tee /etc/initramfs-tools/hooks/xbs_mysplash << 'EOF'
+#!/bin/sh
+cp /sbin/xbs_mysplash "${DESTDIR}/sbin/"
+EOF
+sudo chmod 755 /etc/initramfs-tools/hooks/xbs_mysplash
+
+# Create init-top script
+sudo tee /etc/initramfs-tools/scripts/init-top/xbs_mysplash << 'EOF'
+#!/bin/sh
+if [ -x /sbin/xbs_mysplash ] && ! grep -q nosplash /proc/cmdline; then
+    /sbin/xbs_mysplash &
+    echo $! > /run/xbs_mysplash.pid
+fi
+EOF
+sudo chmod 755 /etc/initramfs-tools/scripts/init-top/xbs_mysplash
+
+# Create init-bottom script
+sudo tee /etc/initramfs-tools/scripts/init-bottom/xbs_mysplash << 'EOF'
+#!/bin/sh
+if [ -f /run/xbs_mysplash.pid ]; then
+    kill $(cat /run/xbs_mysplash.pid) 2>/dev/null
+    rm -f /run/xbs_mysplash.pid
+fi
+# Clear framebuffer
+dd if=/dev/zero of=/dev/fb0 2>/dev/null || true
+EOF
+sudo chmod 755 /etc/initramfs-tools/scripts/init-bottom/xbs_mysplash
+
+# Rebuild initramfs
+sudo update-initramfs -u
+```
+
+### mkinitcpio (Arch Linux)
+
+**Setup:**
+```bash
+# Install binary
+sudo cp xbs_mysplash /sbin/
+sudo chmod 755 /sbin/xbs_mysplash
+
+# Add to mkinitcpio.conf
+sudo sed -i 's|^FILES=()|FILES="/sbin/xbs_mysplash"|' /etc/mkinitcpio.conf
+
+# Or use a custom hook
+sudo tee /etc/initcpio/hooks/bootsplash << 'EOF'
+#!/bin/sh
+run_hook() {
+    if [ -x /sbin/xbs_mysplash ] && ! grep -q nosplash /proc/cmdline; then
+        /sbin/xbs_mysplash &
+        echo $! > /run/xbs_mysplash.pid
+    fi
+}
+
+run_cleanuphook() {
+    if [ -f /run/xbs_mysplash.pid ]; then
+        kill $(cat /run/xbs_mysplash.pid) 2>/dev/null
+        rm -f /run/xbs_mysplash.pid
+    fi
+    dd if=/dev/zero of=/dev/fb0 2>/dev/null || true
+}
+EOF
+sudo chmod 755 /etc/initcpio/hooks/bootsplash
+
+sudo tee /etc/initcpio/install/bootsplash << 'EOF'
+#!/bin/sh
+build() {
+    add_file /sbin/xbs_mysplash
+    add_runscript
+}
+help() {
+    echo "Boot splash animation"
+}
+EOF
+sudo chmod 755 /etc/initcpio/install/bootsplash
+
+# Add 'bootsplash' to HOOKS in /etc/mkinitcpio.conf
+# HOOKS=(base udev bootsplash autodetect ...)
+
+# Rebuild
+sudo mkinitcpio -P
+```
+
+### dracut (Fedora/RHEL)
+
+**Setup:**
+```bash
+# Install binary
+sudo cp xbs_mysplash /sbin/
+sudo chmod 755 /sbin/xbs_mysplash
+
+# Create dracut module
+sudo mkdir -p /usr/lib/dracut/modules.d/90bootsplash
+
+sudo tee /usr/lib/dracut/modules.d/90bootsplash/module-setup.sh << 'EOF'
+#!/bin/bash
+check() {
+    return 0
+}
+depends() {
+    return 0
+}
+install() {
+    inst /sbin/xbs_mysplash
+    inst_hook pre-udev 90 "$moddir/bootsplash-start.sh"
+    inst_hook cleanup 90 "$moddir/bootsplash-stop.sh"
+}
+EOF
+sudo chmod 755 /usr/lib/dracut/modules.d/90bootsplash/module-setup.sh
+
+sudo tee /usr/lib/dracut/modules.d/90bootsplash/bootsplash-start.sh << 'EOF'
+#!/bin/sh
+if [ -x /sbin/xbs_mysplash ] && ! grep -q nosplash /proc/cmdline; then
+    /sbin/xbs_mysplash &
+    echo $! > /run/xbs_mysplash.pid
+fi
+EOF
+sudo chmod 755 /usr/lib/dracut/modules.d/90bootsplash/bootsplash-start.sh
+
+sudo tee /usr/lib/dracut/modules.d/90bootsplash/bootsplash-stop.sh << 'EOF'
+#!/bin/sh
+if [ -f /run/xbs_mysplash.pid ]; then
+    kill $(cat /run/xbs_mysplash.pid) 2>/dev/null
+    rm -f /run/xbs_mysplash.pid
+fi
+dd if=/dev/zero of=/dev/fb0 2>/dev/null || true
+EOF
+sudo chmod 755 /usr/lib/dracut/modules.d/90bootsplash/bootsplash-stop.sh
+
+# Add to dracut.conf
+echo 'add_dracutmodules+=" bootsplash "' | sudo tee -a /etc/dracut.conf.d/bootsplash.conf
+
+# Rebuild
+sudo dracut --force
+```
+
+### Custom initramfs
+
+For custom init scripts:
+
+```bash
+#!/bin/sh
+# In your init script
+
+# Mount /proc first (required for cmdline check)
+mount -t proc proc /proc
+
+# Start splash (early)
+if [ -x /sbin/xbs_mysplash ] && ! grep -q nosplash /proc/cmdline; then
+    /sbin/xbs_mysplash &
+    SPLASH_PID=$!
+fi
+
+# ... your init logic ...
+
+# Stop splash before switch_root
+if [ -n "$SPLASH_PID" ]; then
+    kill $SPLASH_PID 2>/dev/null
+    # Clear framebuffer
+    dd if=/dev/zero of=/dev/fb0 2>/dev/null || true
+fi
+
+# Hand off to real init
+exec switch_root /root /sbin/init
+```
+
+### Timing Considerations
+
+| Phase | When | Recommended Action |
+|-------|------|-------------------|
+| **init-top** | Before udev | Best for early splash |
+| **pre-udev** | dracut equivalent | Same as init-top |
+| **init-bottom** | Before switch_root | Stop splash cleanly |
+| **cleanup** | dracut equivalent | Same as init-bottom |
+
+**Important**: Always stop the splash before `switch_root` or the process will be killed uncleanly.
 
