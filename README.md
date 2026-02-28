@@ -196,19 +196,19 @@ Mode 4: Static image full screen
 ## Architecture
 
 ```
-Build Time                    Compile Time                 Runtime
-─────────────────────────────────────────────────────────────────────
+   Build Time                      Compile Time                Runtime
+─────────────────────────────────────────────---------────────────────────────
 PNG images (any size)         ┌─ splash_anim_delta.c       ┌─ /dev/fb0
        │                      │  + nolibc.h (static)       │  Frame buffer
-       ▼                      │                            │
-generate_splash               │  OR                        │
-       │                      │                            ▼
-       ├── Convert to RGB     │  splash_anim_drm.c         └─ /dev/dri/card0
-       ├── Resize (optional) │  + libdrm (dynamic)           DRM dumb buffer
+       ▼                      │  OR                        │
+generate_splash               │  splash_anim_drm.c         │
+       │                      │  + libdrm (dynamic)        ▼
+       ├── Convert to RGB     │  DRM dumb buffer           └─ /dev/dri/card0
+       ├── Resize (optional)  │             
        ├── XOR delta          │
-       └── RLE encode        └─ frames_delta.h
-       │                               │
-       ▼                               ▼
+       └── RLE encode         └─ frames_delta.h
+       │                              │
+       ▼                              ▼
 frames_delta.h                   xbootsplash
                                       │
                                       ▼
@@ -669,12 +669,12 @@ xbootsplash supports **two rendering backends**:
 ### Architecture Overview
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    build_anim.sh                            │
-│  - Détecte libdrm via pkg-config                            │
-│  - Menu avec option T (toggle DRM/fbdev)                    │
-│  - Compile le bon source selon USE_DRM                      │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                    build_anim.sh                             │
+│  - libdrm edtected with pkg-config                           │
+│  - Menu with "T" option (toggle DRM/fbdev)                   │
+│  - Compiling corresponding source depending on selon USE_DRM │
+└──────────────────────────────────────────────────────────────┘
                               │
               ┌───────────────┴───────────────┐
               ▼                               ▼
