@@ -23,15 +23,15 @@ This complexity comes at a cost:
 
 **xbootsplash takes a different approach:**
 
-| Aspect | Plymouth | xbootsplash |
-|--------|----------|-------------|
-| Runtime | Daemon + service | Single binary, exits when done |
-| Size | 10+ MB | 13-80 KB |
-| Dependencies | libdrm, libply, plugins | **None** (freestanding) |
-| Boot overhead | DRM init, theme load | ~0.5ms frame decode |
-| Post-boot | Service continues | Nothing left running |
-| Complexity | 50,000+ lines | ~500 lines |
-| Debugging | Logs, services | Direct framebuffer |
+| Aspect | Plymouth | xbootsplash (fbdev) | xbootsplash (DRM) |
+|--------|----------|---------------------|-------------------|
+| Runtime | Daemon + service | Single binary, exits when done | Single binary, exits when done |
+| Size | 10+ MB | 13-80 KB (static) | ~285 KB (dynamic) |
+| Dependencies | libdrm, libply, plugins | **None** (freestanding) | libdrm, libc (dynamic) |
+| Boot overhead | DRM init, theme load | ~0.5ms frame decode | ~0.5ms frame decode |
+| Post-boot | Service continues | Nothing left running | Nothing left running |
+| Complexity | 50,000+ lines | ~500 lines | ~600 lines |
+| Debugging | Logs, services | Direct framebuffer | DRM/KMS dumb buffer |
 
 The philosophy: **do one thing, then get out of the way.**
 
@@ -40,7 +40,8 @@ A boot splash should display an animation and disappear. No services, no daemons
 ## Distribution Compatibility
 
 xbootsplash works on **any Linux distribution** that uses:
-- A framebuffer device (`/dev/fb0`)
+- **fbdev mode**: A framebuffer device (`/dev/fb0`)
+- **DRM mode**: A DRM/KMS device (`/dev/dri/card0`)
 - Standard initramfs (initramfs-tools, dracut, mkinitcpio, or custom)
 
 Tested/compatible with:
@@ -51,16 +52,22 @@ Tested/compatible with:
 - **Alpine**: mkinitfs (custom method)
 - **Custom setups**: Any initramfs with manual init script
 
-The only requirement is a working framebuffer. Most systems provide this via:
+**fbdev mode** works on systems with:
 - `efifb` (EFI systems)
 - `vesafb` (BIOS/legacy)
 - `simplefb` (device tree)
+- DRM drivers with fbdev emulation enabled
+
+**DRM mode** works on systems with:
+- Any DRM/KMS driver (amdgpu, i915, nouveau, radeon, etc.)
+- No fbdev emulation required
 
 ## Features
 
 - **5 Display Modes**: Animation or static image, with solid color or background image
-- **Zero Dependencies**: Freestanding binary, no libc required
-- **Minimal Size**: 13 KB (static image) to 80 KB (animation)
+- **Zero Dependencies** (fbdev): Freestanding binary, no libc required
+- **Minimal Size**: 13 KB (fbdev static) to 80 KB (animation) or ~285 KB (DRM dynamic)
+- **Dual Backend**: fbdev (legacy) and DRM/KMS (modern) support
 - **Auto-detection**: Frame indices, dimensions, optimal compression
 - **Interactive Builder**: Guided setup with validation
 - **SSE2 Optimized**: Fast RGB565→RGB8888 conversion for 32bpp framebuffers
@@ -182,33 +189,36 @@ Mode 4: Static image full screen
 ## Binary
 
 - **Output**: `xbootsplash` (13 KB - 4 MB depending on mode and content)
-- **Format**: Static ELF64, freestanding (no libc)
-- **Entry point**: `_start` (no crt0)
+- **Format (fbdev)**: Static ELF64, freestanding (no libc)
+- **Format (DRM)**: Dynamic ELF64, linked with libdrm
+- **Entry point**: `_start` (fbdev) or `main` (DRM)
 
 ## Architecture
 
 ```
 Build Time                    Compile Time                 Runtime
 ─────────────────────────────────────────────────────────────────────
-PNG images (any size)         splash_anim_delta.c          /dev/fb0
-       │                           │                          │
-       ▼                           ▼                          ▼
-generate_splash              GCC -nostdlib              Frame buffer
-       │                           │                          │
-       ├── Convert to RGB          ├── nolibc.h               │
-       ├── Resize (optional)       └── frames_delta.h         │
-       ├── XOR delta                         │                │
-       └── RLE encode                        ▼                │
-       │                               xbootsplash            │
-       ▼                                   │                  │
-frames_delta.h                             ▼                  ▼
-                                     Load frame(s) ───────► Blit
-                                          │                   │
-                                          ▼                   ▼
-                                        Apply delta ───────► Blit
-                                          │                   │
-                                          ▼                   ▼
-                                  nanosleep(ms) ◄─────────────┘
+PNG images (any size)         ┌─ splash_anim_delta.c       ┌─ /dev/fb0
+       │                      │  + nolibc.h (static)       │  Frame buffer
+       ▼                      │                            │
+generate_splash               │  OR                        │
+       │                      │                            ▼
+       ├── Convert to RGB     │  splash_anim_drm.c         └─ /dev/dri/card0
+       ├── Resize (optional) │  + libdrm (dynamic)           DRM dumb buffer
+       ├── XOR delta          │
+       └── RLE encode        └─ frames_delta.h
+       │                               │
+       ▼                               ▼
+frames_delta.h                   xbootsplash
+                                      │
+                                      ▼
+                                 Load frame(s) ───────► Blit
+                                      │                   │
+                                      ▼                   ▼
+                                   Apply delta ───────► Blit
+                                      │                   │
+                                      ▼                   ▼
+                              nanosleep(ms) ◄─────────────┘
 ```
 
 ## File Structure
@@ -217,11 +227,12 @@ frames_delta.h                             ▼                  ▼
 xbootsplash/
 ├── README.md               # This file
 ├── HOW_TO_INSTALL.md       # Installation guide
-├── Makefile                # Build system
-├── nolibc.h                # Syscall wrappers (freestanding libc)
-├── start.S                 # Startup assembly (_start entry point)
-├── linker.ld               # Custom linker script (minimal ELF)
-├── splash_anim_delta.c     # Main program (multi-mode animation)
+├── Makefile                # Build system (fbdev/DRM targets)
+├── nolibc.h                # Syscall wrappers (freestanding libc, fbdev only)
+├── start.S                 # Startup assembly (_start entry point, fbdev only)
+├── linker.ld               # Custom linker script (minimal ELF, fbdev only)
+├── splash_anim_delta.c     # fbdev program (multi-mode animation)
+├── splash_anim_drm.c       # DRM/KMS program (dumb buffer rendering)
 ├── generate_splash.c       # Generator tool (PNG → compressed C header)
 └── build_anim.sh           # Interactive builder + installer script
 ```
@@ -261,11 +272,11 @@ Follow the prompts to:
 
 ## Design Decisions
 
-### 1. No Libc
+### 1. No Libc (fbdev mode)
 
 **Problem**: Static libc → 600+ KB binary
 
-**Solution**: Direct syscalls via inline assembly
+**Solution**: Direct syscalls via inline assembly (fbdev mode only)
 
 ```c
 // nolibc.h - syscall wrapper
@@ -383,10 +394,18 @@ The benchmark tool automatically recommends the best method for your frames.
 
 ## Framebuffer Support
 
+**fbdev mode:**
+
 | Mode | Handling |
 |------|----------|
 | 16 bpp (RGB565) | Direct memcpy |
-| 32 bpp (XRGB8888) | 565→888 expansion |
+| 32 bpp (XRGB8888) | 565→888 expansion (SSE2) |
+
+**DRM mode:**
+
+| Format | Handling |
+|--------|----------|
+| XRGB8888 | 565→888 expansion (SSE2 optimized for VRAM WC) |
 
 ## Customization
 
@@ -645,7 +664,7 @@ See `HOW_TO_INSTALL.md` for detailed instructions.
 
 ## DRM vs FBDev Compatibility
 
-xbootsplash now supports **two rendering backends**:
+xbootsplash supports **two rendering backends**:
 
 ### Architecture Overview
 
@@ -766,17 +785,19 @@ ls -la /sys/kernel/debug/dri/
 
 If `/dev/fb0` is missing on a DRM system:
 
-1. **Enable fbdev emulation** in kernel config:
+1. **Use DRM mode**: Build with `make drm` or toggle to DRM in `build_anim.sh` - no fbdev emulation needed
+
+2. **Or enable fbdev emulation** in kernel config (for fbdev mode):
    ```
    CONFIG_DRM_FBDEV_EMULATION=y
    ```
 
-2. **Or use simpledrm** (kernel 5.14+):
+3. **Or use simpledrm** (kernel 5.14+):
    ```
    CONFIG_DRM_SIMPLEDRM=y
    ```
 
-3. **GRUB fallback**: Add `nomodeset` to disable DRM and use vesafb/efifb
+4. **GRUB fallback**: Add `nomodeset` to disable DRM and use vesafb/efifb
 
 ## Failure Cases and Expected Behavior
 
