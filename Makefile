@@ -1,9 +1,14 @@
 # xbootsplash - Boot splash animation Makefile
 # Target: Linux x86_64, minimal binary
+#
+# Build modes:
+#   make              -> fbdev version (nolibc, static, minimal)
+#   make drm          -> DRM/KMS version (libdrm, dynamic linking)
+#   make USE_DRM=1    -> same as 'make drm'
 
 CC = gcc
 
-# Nolibc flags (freestanding, no libc)
+# Nolibc flags (freestanding, no libc) - for fbdev version
 NOLIBC_FLAGS = -ffreestanding -fno-builtin -nostdlib -nostartfiles \
                -Os -march=x86-64 -msse2 -fomit-frame-pointer -fstrict-aliasing \
                -fno-asynchronous-unwind-tables -fno-stack-protector \
@@ -15,6 +20,13 @@ NOLIBC_LDFLAGS = -static -nostdlib -nostartfiles \
                  -Wl,--build-id=none,--strip-all,-O1,--gc-sections \
                  -T linker.ld
 
+# DRM flags (uses libdrm, dynamic linking)
+DRM_FLAGS = -O2 -march=x86-64 -msse2 -fomit-frame-pointer \
+            -fno-asynchronous-unwind-tables -fno-stack-protector \
+            $(shell pkg-config --cflags libdrm 2>/dev/null || echo -I/usr/include/libdrm)
+
+DRM_LDFLAGS = $(shell pkg-config --libs libdrm 2>/dev/null || echo -ldrm)
+
 # Target binary name (can be overridden via make TARGET=name or environment)
 TARGET ?= xbootsplash
 GENERATOR = generate_splash
@@ -24,11 +36,25 @@ FRAME_DIR ?= win10_png
 FRAME_OFFSET ?= 80
 FRAME_DELAY ?= 33
 
-.PHONY: all clean debug debug_x test test_ioctl test_mmap test_simple test_frame test_pattern test_debug test_rgb test_frame0 test_square generate
+# Build mode detection
+USE_DRM ?= 0
 
-all: $(TARGET)
+.PHONY: all clean debug debug_x test test_ioctl test_mmap test_simple test_frame test_pattern test_debug test_rgb test_frame0 test_square generate drm fbdev
+
+# Default: build fbdev version (backward compatible)
+all: fbdev
 	@ls -l $(TARGET)
 	@echo "Binary size: $$(stat -c%s $(TARGET)) bytes"
+
+# fbdev version (nolibc, static)
+fbdev: $(TARGET)
+	@ls -l $(TARGET)
+	@echo "Binary size: $$(stat -c%s $(TARGET)) bytes (fbdev mode)"
+
+# DRM version (libdrm, dynamic)
+drm: $(TARGET)_drm
+	@ls -l $(TARGET)_drm
+	@echo "Binary size: $$(stat -c%s $(TARGET)_drm) bytes (DRM mode)"
 
 generate: $(GENERATOR)
 	./$(GENERATOR) -o $(FRAME_OFFSET) -d $(FRAME_DELAY) $(FRAME_DIR) > frames_delta.h
@@ -123,9 +149,17 @@ $(TARGET): splash_anim_delta.o frames_delta.h nolibc.h start.S linker.ld
 splash_anim_delta.o: splash_anim_delta.c nolibc.h frames_delta.h
 	$(CC) $(NOLIBC_FLAGS) -c -o $@ splash_anim_delta.c
 
+# DRM version build rules
+$(TARGET)_drm: splash_anim_drm.o frames_delta.h
+	$(CC) -o $@ splash_anim_drm.o $(DRM_LDFLAGS)
+	strip --strip-all $@
+
+splash_anim_drm.o: splash_anim_drm.c frames_delta.h
+	$(CC) $(DRM_FLAGS) -c -o $@ splash_anim_drm.c
+
 # Regenerate frames_delta.h from PNG images
 frames: $(GENERATOR)
 	./$(GENERATOR) -o $(FRAME_OFFSET) -d $(FRAME_DELAY) $(FRAME_DIR) > frames_delta.h
 
 clean:
-	rm -f $(TARGET) $(GENERATOR) *.o
+	rm -f $(TARGET) $(TARGET)_drm $(GENERATOR) *.o

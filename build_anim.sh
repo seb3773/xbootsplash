@@ -65,11 +65,26 @@ BG_OFFSET_Y=0
 TARGET_RES=""
 LOOP=1  # 1=loop, 0=no-loop (stay on last frame)
 
+# DRM vs fbdev mode
+USE_DRM=0  # 0=fbdev, 1=DRM
+LIBDRM_AVAILABLE=0
+
 # Screen dimensions (detected or specified)
 SCREEN_W=0
 SCREEN_H=0
 OBJECT_W=0
 OBJECT_H=0
+
+# Check for libdrm availability
+check_libdrm() {
+    if pkg-config --exists libdrm 2>/dev/null; then
+        LIBDRM_AVAILABLE=1
+        return 0
+    else
+        LIBDRM_AVAILABLE=0
+        return 1
+    fi
+}
 
 # Show help
 show_help() {
@@ -1133,13 +1148,30 @@ build_animation() {
     
     print_success "Splash data generated"
     
-    # Compile binary
+    # Compile binary (DRM or fbdev based on mode)
     print_info "Compiling $BINARY binary..."
     make clean >/dev/null 2>&1 || true
-    if ! make TARGET="$BINARY" >/dev/null 2>build.log; then
-        print_error "Compilation failed"
-        cat build.log
-        exit 1
+    
+    if [[ $USE_DRM -eq 1 ]]; then
+        # DRM mode: compile splash_anim_drm.c
+        print_info "Using DRM/KMS mode (libdrm)"
+        if ! make drm TARGET="$BINARY" >/dev/null 2>build.log; then
+            print_error "Compilation failed"
+            cat build.log
+            exit 1
+        fi
+        # Rename output
+        if [ -f "${BINARY}_drm" ]; then
+            mv "${BINARY}_drm" "$BINARY"
+        fi
+    else
+        # fbdev mode: compile splash_anim_delta.c (nolibc)
+        print_info "Using fbdev mode (/dev/fb0)"
+        if ! make fbdev TARGET="$BINARY" >/dev/null 2>build.log; then
+            print_error "Compilation failed"
+            cat build.log
+            exit 1
+        fi
     fi
     
     # Verify binary exists
@@ -1160,6 +1192,11 @@ build_animation() {
     echo -e "${BOLD}${GREEN}╠══════════════════════════════════════════════════════════════╣${NC}"
     echo -e "${BOLD}${GREEN}║${NC} ${CYAN}Binary:${NC}          $BINARY"
     echo -e "${BOLD}${GREEN}║${NC} ${CYAN}Size:${NC}            ${size} bytes (${size_kb} KB)"
+    if [[ $USE_DRM -eq 1 ]]; then
+        echo -e "${BOLD}${GREEN}║${NC} ${CYAN}Mode:${NC}            ${GREEN}DRM/KMS${NC} (libdrm, dynamic)"
+    else
+        echo -e "${BOLD}${GREEN}║${NC} ${CYAN}Mode:${NC}            ${CYAN}fbdev${NC} (nolibc, static)"
+    fi
     echo -e "${BOLD}${GREEN}║${NC} ${CYAN}Location:${NC}        $(pwd)/$BINARY"
     echo -e "${BOLD}${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}"
     
@@ -1513,9 +1550,17 @@ install_standard() {
     # Create hook script
     echo -e "${GREEN}[1/4]⚙ Creating initramfs-tools hook...${NC}"
     mkdir -p /etc/initramfs-tools/hooks
+    
+    # Determine mode string for comment
+    local mode_str="fbdev"
+    if [[ $USE_DRM -eq 1 ]]; then
+        mode_str="DRM/KMS"
+    fi
+    
     cat > /etc/initramfs-tools/hooks/$BINARY << HOOK_EOF
 #!/bin/sh
 # initramfs-tools hook for $BINARY bootsplash animation
+# Mode: $mode_str
 
 PREREQ=""
 prereqs() { echo "\$PREREQ"; }
@@ -1523,14 +1568,32 @@ case "\$1" in prereqs) prereqs; exit 0;; esac
 
 . /usr/share/initramfs-tools/hook-functions
 
-# Copy binary
-copy_file binary /sbin/$BINARY /sbin/$BINARY
-
-# Ensure framebuffer device
-if [ ! -e "\${DESTDIR}/dev/fb0" ]; then
-    mknod "\${DESTDIR}/dev/fb0" c 29 0 2>/dev/null || true
-fi
+# Copy binary with dependencies (copy_exec handles ldd for dynamic libs)
+copy_exec /sbin/$BINARY /sbin
 HOOK_EOF
+
+    # Add mode-specific device setup (must be outside heredoc for variable expansion)
+    if [[ $USE_DRM -eq 0 ]]; then
+        cat >> /etc/initramfs-tools/hooks/$BINARY << 'HOOK_FBDEV'
+
+# For fbdev mode: ensure framebuffer device node
+if [ ! -e "${DESTDIR}/dev/fb0" ]; then
+    mknod "${DESTDIR}/dev/fb0" c 29 0 2>/dev/null || true
+fi
+HOOK_FBDEV
+    else
+        cat >> /etc/initramfs-tools/hooks/$BINARY << 'HOOK_DRM'
+
+# For DRM mode: ensure DRI directory exists
+mkdir -p "${DESTDIR}/dev/dri" 2>/dev/null || true
+HOOK_DRM
+    fi
+    
+    cat >> /etc/initramfs-tools/hooks/$BINARY << 'HOOK_END'
+
+# End of hook
+HOOK_END
+
     chmod +x /etc/initramfs-tools/hooks/$BINARY
     echo "  -> /etc/initramfs-tools/hooks/$BINARY"
     
@@ -2494,13 +2557,36 @@ main() {
     # Check dependencies first
     check_dependencies
     
-    # Show main menu
+    # Check for libdrm and set default mode
+    check_libdrm
+    if [[ $LIBDRM_AVAILABLE -eq 1 ]]; then
+        USE_DRM=1  # Default to DRM if available
+        echo -e "   ${GREEN}☉ libdrm detected, using DRM/KMS by default${NC}"
+        echo -e "   ${CYAN}  (you can switch to fbdev via option T)${NC}"
+    else
+        USE_DRM=0
+        echo -e "   ${YELLOW}☉ libdrm not detected, using fbdev (/dev/fb0)${NC}"
+    fi
+    
+    # Show main menu (with optional toggle)
+    show_main_menu
+}
+
+# Show main menu with optional DRM/fbdev toggle
+show_main_menu() {
     echo -e "\n   ╭────────────────────────────────────────────╮ "
     echo -e "   │${BOLD}Select action:${NC}                              │"
     echo "   │                                            │"
     echo -e "   │  ${CYAN}1)${NC} Build new splash animation/splash      │"
     echo -e "   │  ${CYAN}2)${NC} Install existing xbs_* binary          │"
     echo -e "   │  ${CYAN}3)${NC} Uninstall bootsplash                   │"
+    if [[ $LIBDRM_AVAILABLE -eq 1 ]]; then
+        if [[ $USE_DRM -eq 1 ]]; then
+            echo -e "   │  ${YELLOW}T)${NC} Toggle mode (current: ${GREEN}DRM${NC})           │"
+        else
+            echo -e "   │  ${YELLOW}T)${NC} Toggle mode (current: ${CYAN}fbdev${NC})         │"
+        fi
+    fi
     echo -e "   │  ${CYAN}Q)${NC} Quit                                   │"
     echo -e "   ╰────────────────────────────────────────────╯ "
     echo -en "   ${YELLOW}➤ Select option [${CYAN}1${YELLOW}]: ${NC}"
@@ -2518,6 +2604,13 @@ main() {
             fi
             do_uninstall
             exit 0
+            ;;
+        [Tt])
+            if [[ $LIBDRM_AVAILABLE -eq 1 ]]; then
+                USE_DRM=$((1 - USE_DRM))
+                show_main_menu  # Redraw menu with new state
+                return
+            fi
             ;;
         [Qq])
             print_info " "
