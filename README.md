@@ -197,18 +197,18 @@ generate_splash              GCC -nostdlib              Frame buffer
        │                           │                          │
        ├── Convert to RGB          ├── nolibc.h               │
        ├── Resize (optional)       └── frames_delta.h         │
-       ├── XOR delta                         │                 │
-       └── RLE encode                        ▼                 │
-       │                           xbootsplash                │
-       ▼                                  │                   │
-frames_delta.h                         ▼                     ▼
-                                  Load frame(s) ───────► Blit
-                                       │                    │
-                                       ▼                    ▼
-                                  Apply delta ───────► Blit
-                                       │                    │
-                                       ▼                    ▼
-                                  nanosleep(ms) ◄──────────┘
+       ├── XOR delta                         │                │
+       └── RLE encode                        ▼                │
+       │                               xbootsplash            │
+       ▼                                   │                  │
+frames_delta.h                             ▼                  ▼
+                                     Load frame(s) ───────► Blit
+                                          │                   │
+                                          ▼                   ▼
+                                        Apply delta ───────► Blit
+                                          │                   │
+                                          ▼                   ▼
+                                  nanosleep(ms) ◄─────────────┘
 ```
 
 ## File Structure
