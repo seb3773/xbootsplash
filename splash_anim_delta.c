@@ -32,6 +32,19 @@
 static uint16_t *frame_buffer = NULL;
 static uint16_t *bg_buffer = NULL;  /* For mode 1 */
 
+/* Double buffering context */
+static int fb_fd = -1;
+static int fb_has_dblbuf = 0;           /* Runtime detection */
+static int fb_page = 0;                  /* Current page: 0 or 1 */
+static unsigned int fb_yres = 0;        /* Visible height */
+static unsigned int fb_line_len = 0;    /* Line length in bytes */
+
+/* Blit function pointer - set at runtime based on double buffer availability */
+typedef void (*blit_func_t)(uint8_t *fbmem, int fb_w, int fb_h, int line_len, int bpp,
+                           const uint16_t *frame, int fw, int fh, int x, int y,
+                           int r_off, int g_off, int b_off);
+static blit_func_t blit_func = NULL;
+
 /* Volatile flag for signal handling */
 static volatile int terminate_requested = 0;
 
@@ -536,6 +549,35 @@ static void blit_frame(uint8_t *fbmem, int fb_w, int fb_h, int line_len, int bpp
     }
 }
 
+/* Blit with double buffering - write to back buffer and pan */
+static void blit_frame_dblbuf(uint8_t *fbmem, int fb_w, int fb_h, int line_len, int bpp,
+                              const uint16_t *frame, int fw, int fh, int x, int y,
+                              int r_off, int g_off, int b_off) {
+    /* Calculate back buffer offset (alternate page) */
+    int back_page = 1 - fb_page;
+    uint8_t *back_buf = fbmem + back_page * fb_yres * line_len;
+    
+    /* Blit to back buffer */
+    if (bpp == 32) {
+        blit_to_fb_32bpp(back_buf, fb_w, fb_h, line_len, frame, fw, fh, x, y, r_off, g_off, b_off);
+    } else if (bpp == 16) {
+        blit_to_fb_16bpp(back_buf, fb_w, fb_h, line_len, frame, fw, fh, x, y);
+    } else if (bpp == 24) {
+        blit_to_fb_24bpp(back_buf, fb_w, fb_h, line_len, frame, fw, fh, x, y, r_off, g_off, b_off);
+    }
+    
+    /* Pan to back buffer */
+    struct fb_var_screeninfo vinfo;
+    vinfo.yoffset = back_page * fb_yres;
+    vinfo.xoffset = 0;
+    
+    /* Wait for VSync then pan */
+    ioctl(fb_fd, FBIO_WAITFORVSYNC, 0);
+    ioctl(fb_fd, FBIOPAN_DISPLAY, &vinfo);
+    
+    fb_page = back_page;
+}
+
 /* High-precision sleep with EINTR handling */
 static void sleep_ms(unsigned int ms) {
     struct timespec req = {
@@ -681,6 +723,18 @@ int main(void) {
         return 1;
     }
     
+    /* Detect double buffer capability */
+    fb_yres = vinfo.yres;
+    fb_line_len = finfo.line_length;
+    
+    if (vinfo.yres_virtual >= vinfo.yres * 2) {
+        fb_has_dblbuf = 1;
+        blit_func = blit_frame_dblbuf;
+    } else {
+        fb_has_dblbuf = 0;
+        blit_func = blit_frame;
+    }
+    
     /* Detect RGB bit offsets for 32bpp hardware compatibility */
     /* Standard XRGB8888: R=16, G=8, B=0. Some hardware uses BGRX: R=0, G=8, B=16 */
     /* For 24bpp, we need byte positions (0, 1, 2) instead of bit offsets */
@@ -733,8 +787,8 @@ int main(void) {
     /* Main loop */
 #if DISPLAY_MODE == 3 || DISPLAY_MODE == 4
     /* Static image: just display and wait for termination signal */
-    blit_frame(fbmem, vinfo.xres, vinfo.yres, finfo.line_length, vinfo.bits_per_pixel,
-               frame_buffer, FRAME_W, FRAME_H, x, y, r_off, g_off, b_off);
+    blit_func(fbmem, vinfo.xres, vinfo.yres, finfo.line_length, vinfo.bits_per_pixel,
+              frame_buffer, FRAME_W, FRAME_H, x, y, r_off, g_off, b_off);
     
     /* Sleep until signal received */
     while (!terminate_requested) {
@@ -744,8 +798,8 @@ int main(void) {
     /* Animation loop */
     /* Draw background once - animation frames completely cover their area */
 #if DISPLAY_MODE == 1 || DISPLAY_MODE == 2
-    blit_frame(fbmem, vinfo.xres, vinfo.yres, finfo.line_length, vinfo.bits_per_pixel,
-               bg_buffer, BG_W, BG_H, 0, 0, r_off, g_off, b_off);
+    blit_func(fbmem, vinfo.xres, vinfo.yres, finfo.line_length, vinfo.bits_per_pixel,
+              bg_buffer, BG_W, BG_H, 0, 0, r_off, g_off, b_off);
 #endif
     
     int frame_idx = 0;
@@ -753,9 +807,9 @@ int main(void) {
         /* Measure frame start time */
         long frame_start = get_time_ms();
         
-        /* Blit current frame */
-        blit_frame(fbmem, vinfo.xres, vinfo.yres, finfo.line_length, vinfo.bits_per_pixel,
-                   frame_buffer, FRAME_W, FRAME_H, x, y, r_off, g_off, b_off);
+        /* Blit current frame via function pointer (double buffer or single) */
+        blit_func(fbmem, vinfo.xres, vinfo.yres, finfo.line_length, vinfo.bits_per_pixel,
+                  frame_buffer, FRAME_W, FRAME_H, x, y, r_off, g_off, b_off);
         
         /* Check for termination signal */
         if (terminate_requested) break;

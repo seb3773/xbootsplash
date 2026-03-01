@@ -13,7 +13,6 @@
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -75,7 +74,10 @@ static void signal_handler(int sig) {
  * Frame Decompression (same as fbdev version)
  * ============================================================================ */
 
-/* RLE decode: returns number of pixels decoded */
+/* RLE decode for frame 0 (RLE direct format)
+ * 0x00 = end of frame
+ * 0x01-0x7F = next N uint16_t literal values
+ * 0x80-0xFF = repeat next uint16_t value (cmd & 0x7F) times */
 static int decode_rle(const uint8_t *src, size_t src_len, uint16_t *dst, int dst_count) {
     int pos = 0;
     size_t i = 0;
@@ -95,17 +97,22 @@ static int decode_rle(const uint8_t *src, size_t src_len, uint16_t *dst, int dst
                 i += 2;
             }
         } else {
-            /* Skip run: skip (cmd - 0x80 + 1) pixels (unchanged) */
-            int skip = (cmd & 0x7F) + 1;
-            pos += skip;
+            /* RLE run: repeat next value (cmd & 0x7F) times */
+            int count = cmd & 0x7F;
+            if (i + 1 >= src_len) break;
+            uint16_t value = src[i] | (src[i+1] << 8);
+            i += 2;
+            for (int j = 0; j < count && pos < dst_count; j++) {
+                dst[pos++] = value;
+            }
         }
     }
     
     return pos;
 }
 
-/* Apply XOR delta */
-static void apply_delta(const uint8_t *src, size_t src_len) {
+/* Apply XOR delta (RLE XOR format - for COMPRESS_METHOD 0) */
+static void apply_delta_rle_xor(const uint8_t *src, size_t src_len) {
     int pos = 0;
     size_t i = 0;
     int count = FRAME_W * FRAME_H;
@@ -131,10 +138,64 @@ static void apply_delta(const uint8_t *src, size_t src_len) {
     }
 }
 
-/* Load frame 0 (RLE direct) */
+/* Apply RLE Direct delta (COMPRESS_METHOD 1) 
+ * Same format as RLE decode: 0x01-0x7F=literal, 0x80-0xFF=repeat */
+static void apply_delta_rle_direct(const uint8_t *src, size_t src_len) {
+    int pos = 0;
+    size_t i = 0;
+    int count = FRAME_W * FRAME_H;
+    
+    while (i < src_len && pos < count) {
+        uint8_t cmd = src[i++];
+        
+        if (cmd == 0) {
+            break;
+        } else if (cmd <= 0x7F) {
+            /* Literal run: next N uint16_t values */
+            int n = cmd;
+            if (i + n * 2 > src_len) n = (src_len - i) / 2;
+            for (int j = 0; j < n && pos < count; j++) {
+                frame_buffer[pos++] = src[i] | (src[i+1] << 8);
+                i += 2;
+            }
+        } else {
+            /* RLE run: repeat next value (cmd & 0x7F) times */
+            int repeat = cmd & 0x7F;
+            if (i + 1 >= src_len) break;
+            uint16_t value = src[i] | (src[i+1] << 8);
+            i += 2;
+            for (int j = 0; j < repeat && pos < count; j++) {
+                frame_buffer[pos++] = value;
+            }
+        }
+    }
+}
+
+/* Apply delta based on compression method */
+static void apply_delta(const uint8_t *src, size_t src_len) {
+#if COMPRESS_METHOD == 0
+    apply_delta_rle_xor(src, src_len);
+#elif COMPRESS_METHOD == 1
+    apply_delta_rle_direct(src, src_len);
+#else
+    /* Fallback: treat as raw */
+    decode_raw(src, src_len, frame_buffer, FRAME_W * FRAME_H);
+#endif
+}
+
+/* Decode Raw RGB565 (direct pixel values, no compression) */
+static void decode_raw(const uint8_t *src, size_t src_len, uint16_t *dst, int dst_count) {
+    int pixels = src_len / 2;
+    if (pixels > dst_count) pixels = dst_count;
+    
+    for (int i = 0; i < pixels; i++) {
+        dst[i] = src[i * 2] | (src[i * 2 + 1] << 8);
+    }
+}
+
+/* Load frame 0 - always stored as raw RGB565 */
 static void load_frame_0(const uint8_t *data, size_t size) {
-    memset(frame_buffer, 0, FRAME_W * FRAME_H * 2);
-    decode_rle(data, size, frame_buffer, FRAME_W * FRAME_H);
+    decode_raw(data, size, frame_buffer, FRAME_W * FRAME_H);
 }
 
 /* Palette + LZSS decompression */
@@ -184,6 +245,8 @@ static void decompress_palette_lzss(const uint8_t *compressed, size_t comp_size,
 /* ============================================================================
  * DRM/KMS Initialization
  * ============================================================================ */
+
+static void drm_cleanup(xbs_drm_ctx_t *ctx);  /* forward declaration */
 
 static int drm_find_connector(int fd, drmModeRes *res, xbs_drm_ctx_t *ctx) {
     drmModeConnector *conn = NULL;
@@ -310,11 +373,19 @@ static int drm_init(xbs_drm_ctx_t *ctx) {
     }
     
     if (fd < 0) {
-        fprintf(stderr, "DRM: No suitable device found\n");
+        write(2, "DRM: No device\n", 15);
         return -ENODEV;
     }
     
     ctx->fd = fd;
+    
+    /* Try to become DRM master (required for modesetting)
+     * This will fail if X11/Wayland is already running */
+    if (drmSetMaster(fd) < 0) {
+        write(2, "DRM: Cannot become master\n", 26);
+        close(fd);
+        return -EBUSY;
+    }
     
     /* Get resources */
     drmModeRes *res = drmModeGetResources(fd);
@@ -326,6 +397,7 @@ static int drm_init(xbs_drm_ctx_t *ctx) {
     /* Find connected connector */
     ret = drm_find_connector(fd, res, ctx);
     if (ret < 0) {
+        write(2, "DRM: No connector\n", 18);
         drmModeFreeResources(res);
         close(fd);
         return ret;
@@ -334,6 +406,7 @@ static int drm_init(xbs_drm_ctx_t *ctx) {
     /* Find CRTC */
     ret = drm_find_crtc(fd, res, ctx);
     if (ret < 0) {
+        write(2, "DRM: No CRTC\n", 13);
         drmModeFreeResources(res);
         close(fd);
         return ret;
@@ -344,6 +417,7 @@ static int drm_init(xbs_drm_ctx_t *ctx) {
     /* Create framebuffer */
     ret = drm_create_fb(fd, ctx);
     if (ret < 0) {
+        write(2, "DRM: No framebuffer\n", 20);
         close(fd);
         return ret;
     }
@@ -355,8 +429,9 @@ static int drm_init(xbs_drm_ctx_t *ctx) {
     ret = drmModeSetCrtc(fd, ctx->crtc_id, ctx->fb_id, 0, 0, 
                          &ctx->conn_id, 1, &ctx->mode);
     if (ret < 0) {
-        fprintf(stderr, "DRM: Failed to set CRTC\n");
-        /* Continue anyway - might still work */
+        write(2, "DRM: CRTC failed\n", 17);
+        drm_cleanup(ctx);
+        return ret;
     }
     
     return 0;
@@ -373,6 +448,9 @@ static void drm_cleanup(xbs_drm_ctx_t *ctx) {
                        &ctx->conn_id, 1, &ctx->saved_crtc->mode);
         drmModeFreeCrtc(ctx->saved_crtc);
     }
+    
+    /* Release DRM master */
+    drmDropMaster(ctx->fd);
     
     /* Unmap buffer */
     if (ctx->map && ctx->map != MAP_FAILED) {
@@ -508,14 +586,14 @@ static void fill_fb_color(uint8_t *fb, int fb_w, int fb_h, int fb_pitch, uint16_
  * ============================================================================ */
 
 static int check_cmdline_disable(void) {
-    FILE *f = fopen("/proc/cmdline", "r");
-    if (!f) return 0;
+    int fd = open("/proc/cmdline", O_RDONLY);
+    if (fd < 0) return 0;
     
     char buf[4096];
-    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
-    fclose(f);
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
     
-    if (n == 0) return 0;
+    if (n <= 0) return 0;
     buf[n] = '\0';
     
     char *p = buf;
@@ -583,7 +661,7 @@ int main(void) {
     /* Initialize DRM */
     ret = drm_init(&drm_ctx);
     if (ret < 0) {
-        fprintf(stderr, "DRM initialization failed: %d\n", ret);
+        write(2, "DRM: Init failed\n", 17);
         return 1;
     }
     
@@ -593,6 +671,7 @@ int main(void) {
     frame_buffer = mmap(NULL, FRAME_W * FRAME_H * 2, PROT_READ | PROT_WRITE,
                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (frame_buffer == MAP_FAILED) {
+        write(2, "DRM: No memory\n", 14);
         drm_cleanup(&drm_ctx);
         return 1;
     }
@@ -650,6 +729,10 @@ int main(void) {
         /* Blit current frame */
         blit_to_drm(drm_ctx.map, drm_ctx.width, drm_ctx.height, drm_ctx.pitch,
                     frame_buffer, FRAME_W, FRAME_H, x, y);
+        
+        /* Force CRTC refresh - required for dumb buffer updates to be visible */
+        drmModeSetCrtc(drm_ctx.fd, drm_ctx.crtc_id, drm_ctx.fb_id, 0, 0,
+                      &drm_ctx.conn_id, 1, &drm_ctx.mode);
         
         if (terminate_requested) break;
         

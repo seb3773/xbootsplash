@@ -358,6 +358,8 @@ struct fb_fix_screeninfo {
 };
 
 #define FBIOGET_VSCREENINFO 0x4600
+#define FBIOPAN_DISPLAY     0x4606
+#define FBIO_WAITFORVSYNC   0x460c
 #define FBIOGET_FSCREENINFO 0x4602
 
 #endif /* NOLIBC_H */
