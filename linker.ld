@@ -28,7 +28,6 @@ SECTIONS
         __bss_end = .;
     }
     
-    /* Stack at 1MB after code */
     __stack_top = 0x500000;
     
     /DISCARD/ : {
