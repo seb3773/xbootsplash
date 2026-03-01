@@ -63,7 +63,8 @@ BG_IMAGE=""
 BG_OFFSET_X=0
 BG_OFFSET_Y=0
 TARGET_RES=""
-LOOP=1  # 1=loop, 0=no-loop (stay on last frame)
+LOOP_MODE=1  # 0=no loop, 1=full loop, 2=partial loop
+LOOP_START=0  # Start frame for partial loop
 
 # DRM vs fbdev mode
 USE_DRM=0  # 0=fbdev, 1=DRM
@@ -171,7 +172,7 @@ print_header() {
 }
 
 print_step() {
-    echo -e "\n${BLUE}${BOLD}[STEP $1]${NC} ${YELLOW}$2${NC}"
+    echo -e "${BLUE}${BOLD}[STEP $1]${NC} ${YELLOW}$2${NC}"
 }
 
 print_success() {
@@ -273,8 +274,7 @@ is_gui_session() {
 
 # Detect initramfs system
 detect_initramfs_system() {
-    echo ""
-    print_info "☉ Detecting initramfs system..."
+    print_info "${WHITE}☉${CYAN} Detecting initramfs system..."
     
     local initramfs_type=""
     local initramfs_valid=false
@@ -317,8 +317,7 @@ detect_initramfs_system() {
     fi
     
     # Check for framebuffer device
-    echo ""
-    print_info "☉ Checking framebuffer..."
+    print_info "${WHITE}☉${CYAN} Checking framebuffer..."
     if [ -e /dev/fb0 ]; then
         print_success "/dev/fb0 found"
     else
@@ -333,8 +332,7 @@ detect_initramfs_system() {
 
 # Check kernel cmdline for quiet boot options
 check_kernel_cmdline() {
-    echo ""
-    print_info "☉ Checking kernel command line..."
+    print_info "${WHITE}☉${CYAN} Checking kernel command line..."
     
     local cmdline=""
     if [ -f /proc/cmdline ]; then
@@ -530,8 +528,7 @@ check_dependencies() {
 
 # Check and offer to install sstrip (optional)
 check_sstrip() {
-    echo ""
-    print_info "☉ Checking for sstrip (optional, reduces binary size)..."
+    print_info "${WHITE}☉${CYAN} Checking for sstrip (optional, reduces binary size)..."
     
     if command -v sstrip &> /dev/null; then
         print_success "sstrip found"
@@ -615,8 +612,8 @@ install_sstrip() {
 # Analyze frames directory
 analyze_frames() {
     local dir="$1"
-    
-    print_step "2" "Analyzing frames directory..."
+    echo ""
+    print_step "3" "Analyzing frames directory..."
     print_info "Directory: $dir"
     
     # Find image files (PNG, JPG, JPEG)
@@ -687,7 +684,7 @@ analyze_frames() {
     fi
     
     # Display analysis results
-    echo -e "\n     ${BOLD}${GREEN}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "     ${BOLD}${GREEN}╔══════════════════════════════════════════════════════════════╗${NC}"
     echo -e "     ${BOLD}${GREEN}║                    ANALYSIS RESULTS                          ║${NC}"
     echo -e "     ${BOLD}${GREEN}╠══════════════════════════════════════════════════════════════╣${NC}"
     echo -e "     ${BOLD}${GREEN}║${NC} ${CYAN}Total frames:${NC}    $img_count"
@@ -710,9 +707,9 @@ analyze_frames() {
 
 # Select display mode
 select_mode() {
-    print_step "1" "Select display mode..."
-    echo -e "\n   ╭──────────────────────────────────────────────────────────────────────────────╮"
-    echo -e "   │${BOLD}Available display modes:${NC}                                                      │"
+    echo ""
+    print_step "2" "Select splash mode..."
+    echo -e "   ╭──────────────────────────────────────────────────────────────────────────────╮"
     echo -e "   │  ${CYAN}1)${NC} Animation on solid background (default)                                  │"
     echo -e "   │      ${YELLOW}→ Animation frames on uniform color background${NC}                          │"
     echo -e "   │  ${CYAN}2)${NC} Animation on background image                                            │"
@@ -738,7 +735,7 @@ select_mode() {
     local mode_names=("Animation on solid background" "Animation on background image (centered)" 
                       "Animation on background image (fullscreen)" "Static image on solid background" 
                       "Static image full screen")
-    print_info "Selected: ${mode_names[$DISPLAY_MODE]}"
+    print_info "Selected: [${mode_names[$DISPLAY_MODE]}]"
     
     # Mode-specific prompts
     # Modes 1 and 2: need background image
@@ -784,13 +781,13 @@ select_mode() {
 
 # Get build parameters
 get_parameters() {
-    print_step "3" "Configure display parameters..."
+    print_step "4" "Configure display parameters..."
     
     # Show mode-specific diagram
     case $DISPLAY_MODE in
         0)
             echo -e "${CYAN}"
-            echo "     Mode 0: Animation on solid background"
+            echo "        Animation on solid background"
             echo "   ┌─────────────────────────────────────┐"
             echo -e "   │${GRAY_BG}                                     ${BG_RESET}│"
             echo -e "   │${GRAY_BG}                                     ${BG_RESET}│"
@@ -811,7 +808,7 @@ get_parameters() {
             ;;
         1)
             echo -e "${CYAN}"
-            echo "     Mode 1: Animation on background image"
+            echo "        Animation on background image"
             echo "   ┌──────────────────────────────────────┐"
             echo -e "   │${GRAY_BG}                                      ${BG_RESET}│"
             echo -e "   │${GRAY_BG}                                      ${BG_RESET}│"
@@ -833,7 +830,7 @@ get_parameters() {
             ;;
         2)
             echo -e "${CYAN}"
-            echo "     Mode 2: Animation on full screen background image"
+            echo "   Animation on full screen background image"
             echo "   ┌─────────────────────────────────────┐"
             echo -e "   │${GRAY_BG}      Background image (full)        ${BG_RESET}│"
             echo -e "   │${GRAY_BG}                                     ${BG_RESET}│"
@@ -854,7 +851,7 @@ get_parameters() {
             ;;
         3)
             echo -e "${CYAN}"
-            echo "    Mode 3: Static image on solid background"
+            echo "      Static image on solid background"
             echo "   ┌─────────────────────────────────────┐"
             echo -e "   │${GRAY_BG}                                     ${BG_RESET}│"
             echo -e "   │${GRAY_BG}                                     ${BG_RESET}│"
@@ -874,7 +871,7 @@ get_parameters() {
             ;;
         4)
             echo -e "${CYAN}"
-            echo "     Mode 4: Static image full screen"
+            echo "           Static image full screen"
             echo "   ┌─────────────────────────────────────┐"
             echo -e "   │${GREEN_BG}Full screen image (auto resized)     ${BG_RESET}│"
             echo -e "   │${GREEN_BG}                                     ${BG_RESET}│"
@@ -932,13 +929,13 @@ get_parameters() {
         echo -e "  ${YELLOW}Screen: ${SCREEN_W}x${SCREEN_H}, Animation: ${anim_w}x${anim_h}${NC}"
         echo -e "  ${CYAN}Full visibility: X=0 to $max_x, Y=0 to $max_y${NC}"
         echo -e "  ${CYAN}Extended (partial off-screen): X=-${anim_w} to ${SCREEN_W}, Y=-${anim_h} to ${SCREEN_H}${NC}"
-        echo -n "  ➤ Horizontal offset [$FRAME_OFFSET_X]: "
+        echo -en "  ➤ Horizontal offset [${CYAN}$FRAME_OFFSET_X${NC}]: "
         read -r input
         if [ -n "$input" ] && [[ "$input" =~ ^-?[0-9]+$ ]]; then
             FRAME_OFFSET_X="$input"
         fi
         
-        echo -n "  ➤ Vertical offset [$FRAME_OFFSET_Y]: "
+        echo -en "  ➤ Vertical offset [${CYAN}$FRAME_OFFSET_Y${NC}]: "
         read -r input
         if [ -n "$input" ] && [[ "$input" =~ ^-?[0-9]+$ ]]; then
             FRAME_OFFSET_Y="$input"
@@ -960,13 +957,13 @@ get_parameters() {
         echo -e "  ${YELLOW}Screen: ${SCREEN_W}x${SCREEN_H}, Background: ${bg_w}x${bg_h}${NC}"
         echo -e "  ${CYAN}Full visibility: X=0 to $bg_max_x, Y=0 to $bg_max_y${NC}"
         echo -e "  ${CYAN}Extended (partial off-screen): X=-${bg_w} to ${SCREEN_W}, Y=-${bg_h} to ${SCREEN_H}${NC}"
-        echo -n "  ➤ Horizontal offset [$BG_OFFSET_X]: "
+        echo -en "  ➤ Horizontal offset [${CYAN}$BG_OFFSET_X${NC}]: "
         read -r input
         if [ -n "$input" ] && [[ "$input" =~ ^-?[0-9]+$ ]]; then
             BG_OFFSET_X="$input"
         fi
         
-        echo -n "  ➤ Vertical offset [$BG_OFFSET_Y]: "
+        echo -en "  ➤ Vertical offset [${CYAN}$BG_OFFSET_Y${NC}]: "
         read -r input
         if [ -n "$input" ] && [[ "$input" =~ ^-?[0-9]+$ ]]; then
             BG_OFFSET_Y="$input"
@@ -979,13 +976,13 @@ get_parameters() {
         echo -e "  ${YELLOW}Screen: ${SCREEN_W}x${SCREEN_H}, Image: ${anim_w}x${anim_h}${NC}"
         echo -e "  ${CYAN}Full visibility: X=0 to $max_x, Y=0 to $max_y${NC}"
         echo -e "  ${CYAN}Extended (partial off-screen): X=-${anim_w} to ${SCREEN_W}, Y=-${anim_h} to ${SCREEN_H}${NC}"
-        echo -n "  ➤ Horizontal offset [$FRAME_OFFSET_X]: "
+        echo -en "  ➤ Horizontal offset [${CYAN}$FRAME_OFFSET_X${NC}]: "
         read -r input
         if [ -n "$input" ] && [[ "$input" =~ ^-?[0-9]+$ ]]; then
             FRAME_OFFSET_X="$input"
         fi
         
-        echo -n "  ➤ Vertical offset [$FRAME_OFFSET_Y]: "
+        echo -en "  ➤ Vertical offset [${CYAN}$FRAME_OFFSET_Y${NC}]: "
         read -r input
         if [ -n "$input" ] && [[ "$input" =~ ^-?[0-9]+$ ]]; then
             FRAME_OFFSET_Y="$input"
@@ -996,7 +993,7 @@ get_parameters() {
     if [ $DISPLAY_MODE -eq 0 ] || [ $DISPLAY_MODE -eq 1 ] || [ $DISPLAY_MODE -eq 3 ]; then
         echo -e "\n${BOLD}Background color:${NC}"
         echo -e "  ${CYAN}Format: RRGGBB (hex)${NC}"
-        echo -n "  Color [$BG_COLOR]: "
+        echo -en "  Color [${CYAN}$BG_COLOR]${NC}: "
         read -r input
         if [ -n "$input" ] && [[ "$input" =~ ^[0-9A-Fa-f]{6}$ ]]; then
             BG_COLOR="$input"
@@ -1007,24 +1004,37 @@ get_parameters() {
     if [ $DISPLAY_MODE -le 2 ]; then
         echo -e "\n${BOLD}Animation timing:${NC}"
         echo -e "  ${CYAN}Valid range: 1-1000 ms (1=1000 FPS max, 1000=1 FPS min)${NC}"
-        echo -n "  Frame delay (ms) [$FRAME_DELAY]: "
+        echo -en "  Frame delay (ms) [${CYAN}$FRAME_DELAY${NC}]: "
         read -r input
         if [ -n "$input" ] && [[ "$input" =~ ^[0-9]+$ ]] && [ "$input" -ge 1 ] && [ "$input" -le 1000 ]; then
             FRAME_DELAY="$input"
         fi
         
         # Loop option for animation modes
-        echo -e "\n${BOLD}Animation loop:${NC}"
-        echo -e "  ${YELLOW}Loop: restart from frame 0 after last frame${NC}"
-        echo -e "  ${YELLOW}No-loop: stay on last frame after animation ends${NC}"
-        echo -n "  Loop animation? [Y/n]: "
+        echo -e "\n${BOLD}Animation loop mode:${NC}"
+        echo -e "╭───────────────────────────────────────────────────────────────╮"
+        echo -e "│  ${YELLOW}1)${NC} Full loop     - Play 0→N, then restart from 0 (default)   │"
+        echo -e "│  ${YELLOW}2)${NC} No loop       - Play once, stay on last frame             │"
+        echo -e "│  ${YELLOW}3)${NC} Partial loop  - Play 0→N, then loop from frame X to N     │"
+        echo -e "╰───────────────────────────────────────────────────────────────╯"
+        echo -en "${YELLOW}  Loop mode [${CYAN}1${YELLOW}]: "
         read -r input
         case "$input" in
-            [nN][oO]|[nN])
-                LOOP=0
+            2)
+                LOOP_MODE=0
+                ;;
+            3)
+                LOOP_MODE=2
+                echo -n "  Loop start frame (0-$((frame_count-1))): "
+                read -r start_input
+                if [ -n "$start_input" ] && [[ "$start_input" =~ ^[0-9]+$ ]] && [ "$start_input" -ge 0 ] && [ "$start_input" -lt "$frame_count" ]; then
+                    LOOP_START="$start_input"
+                else
+                    LOOP_START=0
+                fi
                 ;;
             *)
-                LOOP=1
+                LOOP_MODE=1
                 ;;
         esac
     fi
@@ -1033,7 +1043,13 @@ get_parameters() {
     echo -e "\n${GREEN}Parameters:${NC}"
     if [ $DISPLAY_MODE -le 2 ]; then
         echo -e "  ${CYAN}Animation offset:${NC}    X=$FRAME_OFFSET_X, Y=$FRAME_OFFSET_Y"
-        echo -e "  ${CYAN}Loop:${NC}             $([ $LOOP -eq 1 ] && echo "Yes" || echo "No (stay on last frame)")"
+        local loop_desc=""
+        case $LOOP_MODE in
+            0) loop_desc="No loop (stay on last frame)" ;;
+            1) loop_desc="Full loop (0→N, 0→N...)" ;;
+            2) loop_desc="Partial loop (0→N, then $LOOP_START→N...)" ;;
+        esac
+        echo -e "  ${CYAN}Loop:${NC}             $loop_desc"
     fi
     if [ $DISPLAY_MODE -eq 1 ]; then
         echo -e "  ${CYAN}Background image offset:${NC} X=$BG_OFFSET_X, Y=$BG_OFFSET_Y"
@@ -1092,7 +1108,7 @@ get_parameters() {
 
 # Build animation
 build_animation() {
-    print_step "4" "Building splash..."
+    print_step "5" "Building splash..."
     
     # Check generator exists
     if [ ! -f "generate_splash" ]; then
@@ -1123,7 +1139,10 @@ build_animation() {
     # Add frame delay for animation modes (0, 1, 2)
     if [ $DISPLAY_MODE -le 2 ]; then
         GEN_CMD="$GEN_CMD -d $FRAME_DELAY"
-        GEN_CMD="$GEN_CMD -l $LOOP"
+        GEN_CMD="$GEN_CMD -l $LOOP_MODE"
+        if [ $LOOP_MODE -eq 2 ]; then
+            GEN_CMD="$GEN_CMD -L $LOOP_START"
+        fi
         
         # Always use auto compression (tests all methods and picks best)
         COMPRESS_METHOD="auto"
@@ -1187,37 +1206,37 @@ build_animation() {
     local size_kb=$((size / 1024))
     
     # Display results
-    echo -e "\n${BOLD}${GREEN}╔══════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${BOLD}${GREEN}║                    BUILD SUCCESSFUL                          ║${NC}"
-    echo -e "${BOLD}${GREEN}╠══════════════════════════════════════════════════════════════╣${NC}"
-    echo -e "${BOLD}${GREEN}║${NC} ${CYAN}Binary:${NC}          $BINARY"
-    echo -e "${BOLD}${GREEN}║${NC} ${CYAN}Size:${NC}            ${size} bytes (${size_kb} KB)"
+    echo -e "\n${BOLD}${GREEN}════════════════════════════════════════════════════════════════${NC}"
+    echo -e "${BOLD}${GREEN}                    BUILD SUCCESSFUL${NC}"
+    echo -e "${BOLD}${GREEN}════════════════════════════════════════════════════════════════${NC}"
+    echo -e "${CYAN}Binary:${NC}          $BINARY"
+    echo -e "${CYAN}Size:${NC}            ${size} bytes (${size_kb} KB)"
     if [[ $USE_DRM -eq 1 ]]; then
-        echo -e "${BOLD}${GREEN}║${NC} ${CYAN}Mode:${NC}            ${GREEN}DRM/KMS${NC} (libdrm, dynamic)"
+        echo -e "${CYAN}Mode:${NC}            ${GREEN}DRM/KMS${NC} (libdrm, dynamic)"
     else
-        echo -e "${BOLD}${GREEN}║${NC} ${CYAN}Mode:${NC}            ${CYAN}fbdev${NC} (nolibc, static)"
+        echo -e "${CYAN}Mode:${NC}            ${CYAN}fbdev${NC} (nolibc, static)"
     fi
-    echo -e "${BOLD}${GREEN}║${NC} ${CYAN}Location:${NC}        $(pwd)/$BINARY"
-    echo -e "${BOLD}${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo -e "${CYAN}Location:${NC}        $(pwd)/$BINARY"
+    echo -e "${BOLD}${GREEN}════════════════════════════════════════════════════════════════${NC}"
     
     # Warning for large binary (> 1MB)
     if [ $size -gt 1048576 ]; then
         echo ""
-        echo -e "${BOLD}${YELLOW}╔══════════════════════════════════════════════════════════════╗${NC}"
-        echo -e "${BOLD}${YELLOW}║                      ⚠ SIZE WARNING ⚠                       ║${NC}"
-        echo -e "${BOLD}${YELLOW}╠══════════════════════════════════════════════════════════════╣${NC}"
-        echo -e "${BOLD}${YELLOW}║${NC} ${RED}Binary size exceeds 1 MB${NC}"
-        echo -e "${BOLD}${YELLOW}║${NC}"
-        echo -e "${BOLD}${YELLOW}║${NC} This is getting large for a boot animation."
-        echo -e "${BOLD}${YELLOW}║${NC} Consider reducing:"
-        echo -e "${BOLD}${YELLOW}║${NC}   ${CYAN}•${NC} Number of frames (fewer frames)"
-        echo -e "${BOLD}${YELLOW}║${NC}   ${CYAN}•${NC} Frame dimensions (smaller images)"
-        echo -e "${BOLD}${YELLOW}║${NC}   ${CYAN}•${NC} Color complexity (simpler graphics)"
-        echo -e "${BOLD}${YELLOW}║${NC}"
-        echo -e "${BOLD}${YELLOW}║${NC} ${GREEN}The animation will still work correctly.${NC}"
-        echo -e "${BOLD}${YELLOW}║${NC} However, a smaller binary loads faster from"
-        echo -e "${BOLD}${YELLOW}║${NC} initramfs and uses less memory."
-        echo -e "${BOLD}${YELLOW}╚══════════════════════════════════════════════════════════════╝${NC}"
+        echo -e "${BOLD}${YELLOW}═══════════════════════════════════════════════════════════════${NC}"
+        echo -e "${BOLD}${YELLOW}                       ⚠ SIZE WARNING ⚠${NC}"
+        echo -e "${BOLD}${YELLOW}═══════════════════════════════════════════════════════════════${NC}"
+        echo -e "${RED}Binary size exceeds 1 MB${NC}"
+        echo -e ""
+        echo -e "This is getting large for a boot animation."
+        echo -e "Consider reducing:"
+        echo -e "${CYAN}•${NC} Number of frames (fewer frames)"
+        echo -e "${CYAN}•${NC} Frame dimensions (smaller images)"
+        echo -e "${CYAN}•${NC} Color complexity (simpler graphics)"
+        echo -e ""
+        echo -e "${GREEN}The animation will still work correctly.${NC}"
+        echo -e "However, a smaller binary loads faster from"
+        echo -e "initramfs and uses less memory."
+        echo -e "════════════════════════════════════════════════════════════════${NC}"
     fi
     
     # Cleanup
@@ -1226,11 +1245,11 @@ build_animation() {
 
 # Test animation
 test_animation() {
-    print_step "5" "Test animation..."
+    print_step "6" "Test animation..."
     
     if [[ $USE_DRM -eq 1 ]]; then
         echo -e "\n${YELLOW}══════════════════════════════════════════════════════════════════${NC}"
-        echo -e "${YELLOW}  ℹ  IMPORTANT: DRM/KMS requires exclusive display access  !   ${NC}"
+        echo -e "${YELLOW}  {ℹ}  IMPORTANT: DRM/KMS requires exclusive display access${NC}"
         echo -e "${YELLOW}═══════════════════════════════════════════════════════════════════${NC}"
         echo ""
         echo -e "${CYAN}DRM mode requires 'DRM master' privileges, which are blocked${NC}"
@@ -1251,7 +1270,7 @@ test_animation() {
         echo ""
     else
         echo -e "\n${YELLOW}══════════════════════════════════════════════════════════════════${NC}"
-        echo -e "${YELLOW}  ℹ  IMPORTANT: Framebuffer requires TTY console mode  !       ${NC}"
+        echo -e "${YELLOW}  {ℹ}  IMPORTANT: Framebuffer requires TTY console mode${NC}"
         echo -e "${YELLOW}═══════════════════════════════════════════════════════════════════${NC}"
         echo ""
         echo -e "${CYAN}The animation requires direct framebuffer access, which only${NC}"
@@ -1270,7 +1289,7 @@ test_animation() {
         echo ""
     fi
     
-    if ask_yes_no "Test animation now?"; then
+    if ask_yes_no "Test animation now ?"; then
         # Check if running under GUI
         if is_gui_session; then
             echo ""
@@ -2176,7 +2195,7 @@ do_uninstall() {
 
 # Generate GIF preview
 generate_preview() {
-    print_step "6" "Generate preview..."
+    print_step "7" "Generate preview..."
     
     # Skip for static modes - offer PNG instead
     if [ $DISPLAY_MODE -eq 3 ] || [ $DISPLAY_MODE -eq 4 ]; then
@@ -2246,9 +2265,10 @@ generate_preview() {
         local gif_delay=$(( FRAME_DELAY / 10 ))
         [ "$gif_delay" -lt 1 ] && gif_delay=1
         
-        # Loop setting: 0 = infinite, 1 = once
+        # Loop setting for GIF: 0 = infinite, 1 = once
+        # For partial loop, we can't easily represent it in GIF, so use infinite loop
         local loop_setting=0
-        [ "$LOOP" -eq 0 ] && loop_setting=1
+        [ "$LOOP_MODE" -eq 0 ] && loop_setting=1
         
         local out_file="${BINARY}_preview.gif"
         
@@ -2280,7 +2300,11 @@ generate_preview() {
             rm -f "$tmp_bg"
             local fsize=$(du -h "$out_file" | cut -f1)
             print_success "Preview generated: $out_file ($fsize, $frame_count frames)"
-            [ "$LOOP" -eq 1 ] && print_info "Loop: Enabled" || print_info "Loop: Disabled (stops at last frame)"
+            case $LOOP_MODE in
+                0) print_info "Loop: No (stops at last frame)" ;;
+                1) print_info "Loop: Full (0→N, 0→N...)" ;;
+                2) print_info "Loop: Partial (0→N, then $LOOP_START→N...)" ;;
+            esac
         else
             rm -f "$tmp_bg"
             print_error "Failed to generate preview GIF"
@@ -2293,7 +2317,7 @@ generate_preview() {
 
 # Install animation
 install_animation() {
-    print_step "7" "Install animation..."
+    print_step "8" "Install animation..."
     
     if [ ! -f "$BINARY" ]; then
         print_error "Binary not found: $BINARY"
@@ -2307,12 +2331,12 @@ install_animation() {
     echo -e "${BLUE}========================================${NC}"
     echo ""
     echo -e "${GREEN}Select installation type:${NC}"
-    echo ""
-    echo -e "  ${CYAN}1)${NC} Boot splash      - Install for boot (initramfs)"
-    echo -e "  ${CYAN}2)${NC} Shutdown splash  - Install for shutdown (systemd-shutdown)"
-    echo -e "  ${CYAN}3)${NC} Both             - Install for boot AND shutdown"
-    echo -e "  ${CYAN}Q)${NC} Quit             - Skip installation"
-    echo ""
+    echo -e "╭───────────────────────────────────────────────────────────────╮"
+    echo -e "│  ${CYAN}1)${NC} Boot splash      - Install for boot (initramfs)           │"
+    echo -e "│  ${CYAN}2)${NC} Shutdown splash  - Install for shutdown (systemd-shutdown)│"
+    echo -e "│  ${CYAN}3)${NC} Both             - Install for boot AND shutdown          │"
+    echo -e "│  ${CYAN}Q)${NC} Quit             - Skip installation                      │"
+    echo -e "╰───────────────────────────────────────────────────────────────╯"
     echo -n "➤ Select option [1]: "
     read -r install_type
     
@@ -2367,14 +2391,14 @@ install_animation() {
 install_boot_menu() {
     echo ""
     echo -e "${GREEN}Select boot installation method:${NC}"
-    echo ""
-    echo -e "  ${CYAN}1)${NC} Standard   - Debian/Ubuntu initramfs-tools (${GREEN}RECOMMENDED${NC})"
-    echo -e "  ${CYAN}2)${NC} Custom     - Full custom initramfs (advanced)"
-    echo -e "  ${CYAN}3)${NC} Uninstall  - Remove bootsplash from system"
-    echo -e "  ${CYAN}I)${NC} Info       - Learn about each installation method"
-    echo -e "  ${CYAN}Q)${NC} Quit       - Skip boot installation"
-    echo ""
-    echo -n "➤ Select option [1]: "
+    echo -e " ╭───────────────────────────────────────────────────────────────╮"
+    echo -e " │  ${CYAN}1)${NC} Standard   - Debian/Ubuntu initramfs-tools (${GREEN}RECOMMENDED${NC})  │"
+    echo -e " │  ${CYAN}2)${NC} Custom     - Full custom initramfs (advanced)             │"
+    echo -e " │  ${CYAN}3)${NC} Uninstall  - Remove bootsplash from system                │"
+    echo -e " │  ${CYAN}I)${NC} Info       - Learn about each installation method         │"
+    echo -e " │  ${CYAN}Q)${NC} Quit       - Skip boot installation                       │"
+    echo -e " ╰───────────────────────────────────────────────────────────────╯"
+    echo -en "${YELLOW}➤ Select option [${CYAN}1${YELLOW}]: "
     read -r choice
     
     case "$choice" in
@@ -2550,7 +2574,7 @@ install_existing_binary() {
     echo -e "  ${CYAN}I)${NC} Info       - Learn about each installation method"
     echo -e "  ${CYAN}Q)${NC} Quit       - Skip installation"
     echo ""
-    echo -n "➤ Select option [1]: "
+    echo -en "${YELLOW}➤ Select option [${CYAN}1${YELLOW}]: "
     read -r choice
     
     case "$choice" in
@@ -2581,10 +2605,11 @@ main() {
     check_dependencies
     
     # Check for libdrm and set default mode
+    print_info "${WHITE}☉${CYAN} Checking libdrm..."
     check_libdrm
     if [[ $LIBDRM_AVAILABLE -eq 1 ]]; then
         USE_DRM=1  # Default to DRM if available
-        echo -e "   ${GREEN}☉ libdrm detected, using DRM/KMS by default${NC}"
+        echo -e "   ${GREEN}✜ libdrm detected, using DRM/KMS by default${NC}"
         echo -e "   ${CYAN}  (you can switch to fbdev via option T)${NC}"
     else
         USE_DRM=0
@@ -2597,21 +2622,21 @@ main() {
 
 # Show main menu with optional DRM/fbdev toggle
 show_main_menu() {
-    echo -e "\n   ╭────────────────────────────────────────────╮ "
-    echo -e "   │${BOLD}Select action:${NC}                              │"
-    echo "   │                                            │"
-    echo -e "   │  ${CYAN}1)${NC} Build new splash animation/splash      │"
-    echo -e "   │  ${CYAN}2)${NC} Install existing xbs_* binary          │"
-    echo -e "   │  ${CYAN}3)${NC} Uninstall bootsplash                   │"
+    echo ""
+    print_step "1" "Select action..."
+    echo -e "    ╭────────────────────────────────────────────╮ "
+    echo -e "    │  ${CYAN}1)${NC} Build new splash animation/splash      │"
+    echo -e "    │  ${CYAN}2)${NC} Install existing xbs_* binary          │"
+    echo -e "    │  ${CYAN}3)${NC} Uninstall bootsplash                   │"
     if [[ $LIBDRM_AVAILABLE -eq 1 ]]; then
         if [[ $USE_DRM -eq 1 ]]; then
-            echo -e "   │  ${YELLOW}T)${NC} Toggle mode (current: ${GREEN}DRM${NC})           │"
+            echo -e "    │  ${CYAN}T)${NC} Toggle mode (current: ${GREEN}DRM${NC})             │"
         else
-            echo -e "   │  ${YELLOW}T)${NC} Toggle mode (current: ${CYAN}fbdev${NC})         │"
+            echo -e "    │  ${$CYAN}T)${NC} Toggle mode (current: ${GREEN}fbdev${NC})           │"
         fi
     fi
-    echo -e "   │  ${CYAN}Q)${NC} Quit                                   │"
-    echo -e "   ╰────────────────────────────────────────────╯ "
+    echo -e "    │  ${CYAN}Q)${NC} Quit                                   │"
+    echo -e "    ╰────────────────────────────────────────────╯ "
     echo -en "   ${YELLOW}➤ Select option [${CYAN}1${YELLOW}]: ${NC}"
     read -r main_choice
     
