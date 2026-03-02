@@ -14,18 +14,23 @@ NOLIBC_FLAGS = -ffreestanding -fno-builtin -nostdlib -nostartfiles \
                -fno-asynchronous-unwind-tables -fno-stack-protector \
                -fno-pic -fno-pie -fvisibility=hidden \
                -ffunction-sections -fdata-sections \
+               -flto=2 -fno-ident \
                -DNOLIBC_NO_ARENA
 
 NOLIBC_LDFLAGS = -static -nostdlib -nostartfiles \
                  -Wl,--build-id=none,--strip-all,-O1,--gc-sections \
+                 -flto=2 -fuse-ld=gold \
                  -T linker.ld
 
 # DRM flags (uses libdrm, dynamic linking)
 DRM_FLAGS = -O2 -march=x86-64 -msse2 -fomit-frame-pointer \
             -fno-asynchronous-unwind-tables -fno-stack-protector \
+            -fvisibility=hidden -ffunction-sections -fdata-sections \
+            -flto=2 -fno-ident \
             $(shell pkg-config --cflags libdrm 2>/dev/null || echo -I/usr/include/libdrm)
 
-DRM_LDFLAGS = $(shell pkg-config --libs libdrm 2>/dev/null || echo -ldrm)
+DRM_LDFLAGS = -flto=2 -fuse-ld=gold -Wl,--gc-sections,--as-needed \
+              $(shell pkg-config --libs libdrm 2>/dev/null || echo -ldrm)
 
 # Target binary name (can be overridden via make TARGET=name or environment)
 TARGET ?= xbootsplash

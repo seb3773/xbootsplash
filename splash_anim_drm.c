@@ -6,6 +6,8 @@
  * 
  * This is the modern path for systems without /dev/fb0 support.
  * Uses the same frames_delta.h format as the fbdev version.
+ * 
+ * Special mode: --restore-crtc restores CRTC from saved state file.
  */
 
 #include <errno.h>
@@ -13,6 +15,7 @@
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -24,6 +27,9 @@
 
 /* Generated frame data */
 #include "frames_delta.h"
+
+/* CRTC state file for external restore after SIGKILL */
+#define CRTC_STATE_FILE "/run/xbs_drm_crtc.info"
 
 /* ============================================================================
  * DRM/KMS Context
@@ -44,6 +50,9 @@ typedef struct {
     uint32_t pitch;
     uint32_t size;
     uint8_t *map;
+    
+    /* Card index for restore */
+    int card_idx;
     
     /* Dimensions */
     uint32_t width;
@@ -171,12 +180,48 @@ static void apply_delta_rle_direct(const uint8_t *src, size_t src_len) {
     }
 }
 
+/* Decode Sparse XOR delta (position + value for changed pixels) */
+static void apply_delta_sparse_xor(const uint8_t *delta, size_t delta_size) {
+    if (delta_size < 2) return;
+    
+    size_t pos = 0;
+    int changed = delta[pos] | (delta[pos + 1] << 8);
+    pos += 2;
+    
+    for (int i = 0; i < changed && pos + 3 < delta_size; i++) {
+        int idx = delta[pos] | (delta[pos + 1] << 8);
+        uint16_t xor_val = delta[pos + 2] | (delta[pos + 3] << 8);
+        pos += 4;
+        
+        if (idx < FRAME_W * FRAME_H) {
+            frame_buffer[idx] ^= xor_val;
+        }
+    }
+}
+
+/* Decode Raw RGB565 delta (direct pixel values, overwrites buffer) */
+static void apply_delta_raw(const uint8_t *raw, size_t size) {
+    int pixels = size / 2;
+    if (pixels > FRAME_W * FRAME_H) pixels = FRAME_W * FRAME_H;
+    
+    for (int i = 0; i < pixels; i++) {
+        frame_buffer[i] = raw[i * 2] | (raw[i * 2 + 1] << 8);
+    }
+}
+
+/* Forward declaration */
+static void decode_raw(const uint8_t *src, size_t src_len, uint16_t *dst, int dst_count);
+
 /* Apply delta based on compression method */
 static void apply_delta(const uint8_t *src, size_t src_len) {
 #if COMPRESS_METHOD == 0
     apply_delta_rle_xor(src, src_len);
 #elif COMPRESS_METHOD == 1
     apply_delta_rle_direct(src, src_len);
+#elif COMPRESS_METHOD == 2
+    apply_delta_sparse_xor(src, src_len);
+#elif COMPRESS_METHOD == 3
+    apply_delta_raw(src, src_len);
 #else
     /* Fallback: treat as raw */
     decode_raw(src, src_len, frame_buffer, FRAME_W * FRAME_H);
@@ -199,43 +244,53 @@ static void load_frame_0(const uint8_t *data, size_t size) {
 }
 
 /* Palette + LZSS decompression */
+/* LZSS format: flag byte + 8 items (literal=1byte or back-ref=2bytes) */
+#define LZSS_WINDOW_SIZE 4096
+#define LZSS_MIN_MATCH  3
+
 static void decompress_palette_lzss(const uint8_t *compressed, size_t comp_size,
                                      const uint16_t *palette, size_t palette_size,
                                      uint16_t *dst, int pixel_count) {
-    /* Simple LZSS: copy palette indices */
-    int pos = 0;
-    size_t i = 0;
+    uint8_t window[LZSS_WINDOW_SIZE];
+    int window_pos = 0;
+    int out_pos = 0;
+    size_t in_pos = 0;
     
-    while (i < comp_size && pos < pixel_count) {
-        uint8_t b = compressed[i++];
+    /* Initialize window */
+    for (int i = 0; i < LZSS_WINDOW_SIZE; i++) window[i] = 0;
+    
+    while (in_pos < comp_size && out_pos < pixel_count) {
+        uint8_t flag = compressed[in_pos++];
         
-        if (b < 0x80) {
-            /* Literal palette index */
-            if (b < palette_size) {
-                dst[pos++] = palette[b];
-            }
-        } else if (b >= 0x80 && b <= 0xBF) {
-            /* Short match: (b - 0x80) + 2 bytes */
-            /* Simplified: just copy next N bytes as palette indices */
-            int n = (b - 0x80) + 2;
-            for (int j = 0; j < n && pos < pixel_count && i < comp_size; j++) {
-                uint8_t idx = compressed[i++];
-                if (idx < palette_size) {
-                    dst[pos++] = palette[idx];
-                }
-            }
-        } else {
-            /* Long match or RLE */
-            if (i < comp_size) {
-                int n = compressed[i++];
-                for (int j = 0; j < n && pos < pixel_count; j++) {
-                    /* Use previous pixel or palette[0] */
-                    if (pos > 0) {
-                        dst[pos] = dst[pos - 1];
-                    } else if (palette_size > 0) {
-                        dst[pos] = palette[0];
-                    }
-                    pos++;
+        for (int bit = 0; bit < 8 && out_pos < pixel_count; bit++) {
+            if (in_pos >= comp_size) break;
+            
+            if (flag & (1 << bit)) {
+                /* Literal byte */
+                uint8_t val = compressed[in_pos++];
+                window[window_pos] = val;
+                window_pos = (window_pos + 1) % LZSS_WINDOW_SIZE;
+                
+                /* Expand via palette */
+                dst[out_pos++] = palette[val < palette_size ? val : 0];
+            } else {
+                /* Back-reference: 2 bytes */
+                if (in_pos + 1 >= comp_size) break;
+                uint8_t b1 = compressed[in_pos++];
+                uint8_t b2 = compressed[in_pos++];
+                
+                int offset = (b1 | ((b2 & 0xF0) << 4));
+                int length = (b2 & 0x0F) + LZSS_MIN_MATCH;
+                
+                /* Copy from window */
+                for (int i = 0; i < length && out_pos < pixel_count; i++) {
+                    int win_idx = (window_pos - offset + LZSS_WINDOW_SIZE) % LZSS_WINDOW_SIZE;
+                    uint8_t val = window[win_idx];
+                    window[window_pos] = val;
+                    window_pos = (window_pos + 1) % LZSS_WINDOW_SIZE;
+                    
+                    /* Expand via palette */
+                    dst[out_pos++] = palette[val < palette_size ? val : 0];
                 }
             }
         }
@@ -247,6 +302,7 @@ static void decompress_palette_lzss(const uint8_t *compressed, size_t comp_size,
  * ============================================================================ */
 
 static void drm_cleanup(xbs_drm_ctx_t *ctx);  /* forward declaration */
+static void save_crtc_state(xbs_drm_ctx_t *ctx);  /* forward declaration */
 
 static int drm_find_connector(int fd, drmModeRes *res, xbs_drm_ctx_t *ctx) {
     drmModeConnector *conn = NULL;
@@ -357,19 +413,25 @@ static int drm_init(xbs_drm_ctx_t *ctx) {
     int ret;
     
     /* Open DRM device */
-    const char *cards[] = { "/dev/dri/card0", "/dev/dri/card1", NULL };
+    /* Open DRM device and find connected connector */
     int fd = -1;
+    int found_card_idx = -1;
     
-    for (int i = 0; cards[i]; i++) {
-        fd = open(cards[i], O_RDWR | O_CLOEXEC);
-        if (fd >= 0) {
-            uint64_t has_dumb;
-            if (drmGetCap(fd, DRM_CAP_DUMB_BUFFER, &has_dumb) >= 0 && has_dumb) {
-                break;
-            }
-            close(fd);
-            fd = -1;
+    /* Scan all DRI cards (handles multi-GPU, eGPU systems) */
+    for (int card_idx = 0; card_idx < 16; card_idx++) {
+        char card_path[32];
+        snprintf(card_path, sizeof(card_path), "/dev/dri/card%d", card_idx);
+        
+        fd = open(card_path, O_RDWR | O_CLOEXEC);
+        if (fd < 0) continue;
+        
+        uint64_t has_dumb;
+        if (drmGetCap(fd, DRM_CAP_DUMB_BUFFER, &has_dumb) >= 0 && has_dumb) {
+            found_card_idx = card_idx;  /* Remember which card we're using */
+            break;  /* Found usable device */
         }
+        close(fd);
+        fd = -1;
     }
     
     if (fd < 0) {
@@ -378,13 +440,14 @@ static int drm_init(xbs_drm_ctx_t *ctx) {
     }
     
     ctx->fd = fd;
+    ctx->card_idx = found_card_idx;  /* Save for restore */
     
-    /* Try to become DRM master (required for modesetting)
-     * This will fail if X11/Wayland is already running */
+    /* Try to become DRM master (required for modesetting on older kernels)
+     * On newer kernels (5.8+), modesetting works without master if CAP_SYS_ADMIN
+     * So failure here is not fatal - we'll try modesetting anyway */
     if (drmSetMaster(fd) < 0) {
-        write(2, "DRM: Cannot become master\n", 26);
-        close(fd);
-        return -EBUSY;
+        write(2, "DRM: Cannot become master (continuing anyway)\n", 46);
+        /* Don't fail - try to proceed with modesetting */
     }
     
     /* Get resources */
@@ -425,6 +488,9 @@ static int drm_init(xbs_drm_ctx_t *ctx) {
     /* Save current CRTC state */
     ctx->saved_crtc = drmModeGetCrtc(fd, ctx->crtc_id);
     
+    /* Save to file for external restore after SIGKILL */
+    save_crtc_state(ctx);
+    
     /* Set mode */
     ret = drmModeSetCrtc(fd, ctx->crtc_id, ctx->fb_id, 0, 0, 
                          &ctx->conn_id, 1, &ctx->mode);
@@ -447,7 +513,11 @@ static void drm_cleanup(xbs_drm_ctx_t *ctx) {
                        ctx->saved_crtc->x, ctx->saved_crtc->y,
                        &ctx->conn_id, 1, &ctx->saved_crtc->mode);
         drmModeFreeCrtc(ctx->saved_crtc);
+        ctx->saved_crtc = NULL;
     }
+    
+    /* Remove CRTC state file */
+    unlink(CRTC_STATE_FILE);
     
     /* Release DRM master */
     drmDropMaster(ctx->fd);
@@ -472,6 +542,65 @@ static void drm_cleanup(xbs_drm_ctx_t *ctx) {
     ctx->fd = -1;
 }
 
+/* Save CRTC state to file for external restore (after SIGKILL) */
+static void save_crtc_state(xbs_drm_ctx_t *ctx) {
+    if (!ctx->saved_crtc) return;
+    
+    FILE *f = fopen(CRTC_STATE_FILE, "w");
+    if (!f) return;
+    
+    fprintf(f, "%u %u %u %u %u %d ", 
+            ctx->saved_crtc->crtc_id,
+            ctx->saved_crtc->buffer_id,
+            ctx->saved_crtc->x,
+            ctx->saved_crtc->y,
+            ctx->conn_id,
+            ctx->card_idx);
+    /* Write mode info */
+    fwrite(&ctx->saved_crtc->mode, sizeof(drmModeModeInfo), 1, f);
+    fclose(f);
+}
+
+/* Restore CRTC from saved state file (standalone mode) */
+static int restore_crtc_from_file(void) {
+    FILE *f = fopen(CRTC_STATE_FILE, "r");
+    if (!f) return -1;
+    
+    uint32_t crtc_id, buffer_id, x, y, conn_id;
+    int card_idx;
+    drmModeModeInfo mode;
+    
+    if (fscanf(f, "%u %u %u %u %u %d ", &crtc_id, &buffer_id, &x, &y, &conn_id, &card_idx) != 6) {
+        fclose(f);
+        return -1;
+    }
+    
+    if (fread(&mode, sizeof(drmModeModeInfo), 1, f) != 1) {
+        fclose(f);
+        return -1;
+    }
+    fclose(f);
+    
+    /* Open the SAME DRM device that was used during splash */
+    char card_path[32];
+    snprintf(card_path, sizeof(card_path), "/dev/dri/card%d", card_idx);
+    int fd = open(card_path, O_RDWR);
+    if (fd < 0) return -1;
+    
+    /* Try to become DRM master for modesetting */
+    drmSetMaster(fd);  /* May fail if already master, that's OK */
+    
+    /* Restore CRTC */
+    int ret = drmModeSetCrtc(fd, crtc_id, buffer_id, x, y, &conn_id, 1, &mode);
+    drmDropMaster(fd);
+    close(fd);
+    
+    /* Remove state file */
+    unlink(CRTC_STATE_FILE);
+    
+    return ret;
+}
+
 /* ============================================================================
  * Blitting Functions (SSE2 optimized for VRAM Write-Combining)
  * ============================================================================ */
@@ -479,9 +608,15 @@ static void drm_cleanup(xbs_drm_ctx_t *ctx) {
 #include <emmintrin.h>
 
 /* SSE2 optimized RGB565 to XRGB8888 conversion - processes 8 pixels at once
- * Critical for VRAM: uses _mm_storeu_si128 (16-byte writes) for optimal PCIe bandwidth
- * Write-Combining requires contiguous 64-byte blocks for best performance */
+ * Critical for VRAM: uses _mm_stream_si128 (non-temporal stores) for optimal PCIe bandwidth
+ * Non-temporal stores bypass cache - ideal for Write-Combining VRAM memory
+ * WC memory requires contiguous 64-byte blocks for best performance */
 static void blit_rgb565_to_xrgb8888_sse2(uint32_t *dst, const uint16_t *src, int count) {
+    /* Hoist mask constants outside loop */
+    const __m128i r_mask = _mm_set1_epi32(0x0000F800);  /* bits 11-15 */
+    const __m128i g_mask = _mm_set1_epi32(0x000007E0);  /* bits 5-10 */
+    const __m128i b_mask = _mm_set1_epi32(0x0000001F);  /* bits 0-4 */
+    
     int i = 0;
     
     /* Process 8 pixels at a time */
@@ -498,21 +633,18 @@ static void blit_rgb565_to_xrgb8888_sse2(uint32_t *dst, const uint16_t *src, int
         /* XRGB8888 target: R@16-23, G@8-15, B@0-7 */
         
         /* R5 (bits 11-15) -> R8 (bits 16-23): shift left by 5 (to bit 16), then 3 more for expansion */
-        __m128i r_mask = _mm_set1_epi32(0x0000F800);  /* bits 11-15 */
         __m128i r_lo = _mm_and_si128(lo, r_mask);
         __m128i r_hi = _mm_and_si128(hi, r_mask);
         r_lo = _mm_slli_epi32(r_lo, 5 + 3);  /* shift to bit 16, then expand 5->8 bits */
         r_hi = _mm_slli_epi32(r_hi, 5 + 3);
         
         /* G6 (bits 5-10) -> G8 (bits 8-15): shift left by 3 (to bit 8), then 2 more for expansion */
-        __m128i g_mask = _mm_set1_epi32(0x000007E0);  /* bits 5-10 */
         __m128i g_lo = _mm_and_si128(lo, g_mask);
         __m128i g_hi = _mm_and_si128(hi, g_mask);
         g_lo = _mm_slli_epi32(g_lo, 3 + 2);  /* shift to bit 8, then expand 6->8 bits */
         g_hi = _mm_slli_epi32(g_hi, 3 + 2);
         
         /* B5 (bits 0-4) -> B8 (bits 0-7): no shift needed, just expand by 3 */
-        __m128i b_mask = _mm_set1_epi32(0x0000001F);  /* bits 0-4 */
         __m128i b_lo = _mm_and_si128(lo, b_mask);
         __m128i b_hi = _mm_and_si128(hi, b_mask);
         b_lo = _mm_slli_epi32(b_lo, 3);  /* expand 5->8 bits */
@@ -522,10 +654,13 @@ static void blit_rgb565_to_xrgb8888_sse2(uint32_t *dst, const uint16_t *src, int
         __m128i result_lo = _mm_or_si128(_mm_or_si128(r_lo, g_lo), b_lo);
         __m128i result_hi = _mm_or_si128(_mm_or_si128(r_hi, g_hi), b_hi);
         
-        /* Store 8 XRGB8888 pixels (32 bytes) - 16-byte aligned stores for WC efficiency */
-        _mm_storeu_si128((__m128i *)(dst + i), result_lo);
-        _mm_storeu_si128((__m128i *)(dst + i + 4), result_hi);
+        /* Non-temporal stores for VRAM - bypass cache for WC memory efficiency */
+        _mm_stream_si128((__m128i *)(dst + i), result_lo);
+        _mm_stream_si128((__m128i *)(dst + i + 4), result_hi);
     }
+    
+    /* SFENCE to ensure all non-temporal stores are complete */
+    _mm_sfence();
     
     /* Handle remaining pixels with scalar code */
     for (; i < count; i++) {
@@ -638,14 +773,23 @@ static void sleep_ms(unsigned int ms) {
         .tv_sec = ms / 1000,
         .tv_nsec = (ms % 1000) * 1000000L
     };
-    nanosleep(&req, NULL);
+    struct timespec rem;
+    while (nanosleep(&req, &rem) != 0 && !terminate_requested) {
+        req = rem;
+    }
 }
 
 /* ============================================================================
  * Main
  * ============================================================================ */
 
-int main(void) {
+int main(int argc, char **argv) {
+    /* Check for restore mode */
+    if (argc > 1 && strcmp(argv[1], "--restore-crtc") == 0) {
+        int ret = restore_crtc_from_file();
+        return ret < 0 ? 1 : 0;
+    }
+    
     xbs_drm_ctx_t drm_ctx = {0};
     int ret;
     
@@ -730,9 +874,14 @@ int main(void) {
         blit_to_drm(drm_ctx.map, drm_ctx.width, drm_ctx.height, drm_ctx.pitch,
                     frame_buffer, FRAME_W, FRAME_H, x, y);
         
-        /* Force CRTC refresh - required for dumb buffer updates to be visible */
-        drmModeSetCrtc(drm_ctx.fd, drm_ctx.crtc_id, drm_ctx.fb_id, 0, 0,
-                      &drm_ctx.conn_id, 1, &drm_ctx.mode);
+        /* Mark framebuffer as dirty to trigger refresh - lighter than drmModeSetCrtc */
+        struct drm_clip_rect clip = {
+            .x1 = 0,
+            .y1 = 0,
+            .x2 = drm_ctx.width,
+            .y2 = drm_ctx.height
+        };
+        drmModeDirtyFB(drm_ctx.fd, drm_ctx.fb_id, &clip, 1);
         
         if (terminate_requested) break;
         
@@ -740,15 +889,20 @@ int main(void) {
         frame_idx++;
         
         if (frame_idx >= NFRAMES) {
-#ifdef LOOP
-            if (LOOP) {
-                frame_idx = 0;
-                load_frame_0(frames[0], frame_sizes[0]);
-            } else {
-                while (!terminate_requested) sleep_ms(1000);
-                break;
+#if defined(LOOP_MODE) && LOOP_MODE == 0
+            /* No loop: stay on last frame until terminated */
+            while (!terminate_requested) sleep_ms(1000);
+            break;
+#elif defined(LOOP_MODE) && LOOP_MODE == 2
+            /* Partial loop: replay frames 0 to LOOP_START-1 to restore buffer state */
+            /* XOR deltas are chained, so we need correct base state before LOOP_START */
+            load_frame_0(frames[0], frame_sizes[0]);
+            for (int f = 1; f < LOOP_START && !terminate_requested; f++) {
+                apply_delta(frames[f], frame_sizes[f]);
             }
+            frame_idx = LOOP_START;
 #else
+            /* Default or LOOP_MODE=1: full loop from frame 0 */
             frame_idx = 0;
             load_frame_0(frames[0], frame_sizes[0]);
 #endif

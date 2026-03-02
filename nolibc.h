@@ -165,8 +165,8 @@ static inline __attribute__((always_inline)) int munmap(void *addr, size_t lengt
     return (int)syscall2(SYS_munmap, (long)addr, length);
 }
 
-static inline __attribute__((always_inline)) int ioctl(int fd, unsigned long request, void *arg) {
-    return (int)syscall3(SYS_ioctl, fd, request, (long)arg);
+static inline __attribute__((always_inline)) int ioctl(int fd, unsigned long request, unsigned long arg) {
+    return (int)syscall3(SYS_ioctl, fd, request, arg);
 }
 
 /* memset - x86_64 rep stosb for minimal binary size */
@@ -198,19 +198,29 @@ static inline void *memcpy(void *dest, const void *src, size_t n) {
 #ifndef NOLIBC_NO_ARENA
 #define ARENA_SIZE (2 * 1024 * 1024)
 
+/* Header for each allocation: stores size for realloc */
+typedef struct {
+    size_t size;  /* Original requested size (not aligned) */
+} alloc_header_t;
+
 static char arena[ARENA_SIZE] __attribute__((aligned(16)));
 static size_t arena_offset = 0;
 
 static inline void *malloc(size_t size) {
-    /* Align to 16 bytes */
-    size = (size + 15) & ~15;
+    /* Reserve space for header + aligned payload */
+    size_t aligned_size = (size + 15) & ~15;
+    size_t total_size = sizeof(alloc_header_t) + aligned_size;
     
-    if (arena_offset + size > ARENA_SIZE) {
+    if (arena_offset + total_size > ARENA_SIZE) {
         return NULL;
     }
     
-    void *ptr = arena + arena_offset;
-    arena_offset += size;
+    /* Store header with original size */
+    alloc_header_t *header = (alloc_header_t *)(arena + arena_offset);
+    header->size = size;
+    
+    void *ptr = arena + arena_offset + sizeof(alloc_header_t);
+    arena_offset += total_size;
     return ptr;
 }
 
@@ -220,9 +230,29 @@ static inline void free(void *ptr) {
 }
 
 static inline void *realloc(void *ptr, size_t size) {
-    /* Simple: allocate new, don't free old */
-    (void)ptr;
-    return malloc(size);
+    /* If ptr is NULL, just malloc */
+    if (!ptr) return malloc(size);
+    
+    /* If size is 0, free (no-op) and return NULL */
+    if (size == 0) return NULL;
+    
+    /* Get old size from header */
+    alloc_header_t *header = (alloc_header_t *)((char *)ptr - sizeof(alloc_header_t));
+    size_t old_size = header->size;
+    
+    /* Allocate new block */
+    void *new_ptr = malloc(size);
+    if (!new_ptr) return NULL;
+    
+    /* Copy old content up to min(old_size, new_size) */
+    size_t copy_size = old_size < size ? old_size : size;
+    char *src = (char *)ptr;
+    char *dst = (char *)new_ptr;
+    for (size_t i = 0; i < copy_size; i++) {
+        dst[i] = src[i];
+    }
+    
+    return new_ptr;
 }
 #endif /* NOLIBC_NO_ARENA */
 
@@ -269,7 +299,8 @@ struct sigaction {
 };
 
 /* Restorer function for signal handler (required on x86_64) */
-static void __attribute__((noinline)) __restore_rt(void) {
+/* MUST be naked - kernel expects rt_sigreturn immediately without prologue */
+static void __attribute__((naked)) __restore_rt(void) {
     __asm__ volatile (
         "movq $15, %%rax\n\t"    /* SYS_rt_sigreturn */
         "syscall"
@@ -277,6 +308,7 @@ static void __attribute__((noinline)) __restore_rt(void) {
         :
         : "memory"
     );
+    __builtin_unreachable();  /* Tell compiler this never returns */
 }
 
 /* rt_sigaction syscall wrapper */

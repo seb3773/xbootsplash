@@ -5,13 +5,13 @@ A minimal, high-performance boot splash animation for Linux x86_64 systems.
 ## Quick Start
 
 ```bash
-# 1. Compile
-make
+# 1. Build and install interactively
+./build_anim.sh /path/to/frames
 
-# 2. Install (choose method)
-sudo ./splashboot_install.sh --method standard   # RECOMMENDED
-# OR
-sudo ./splashboot_install.sh --method custom --initramfs-dir /boot/my-initramfs
+# 2. Follow the interactive menu:
+#    - Select installation method
+#    - Configure animation parameters
+#    - Install to initramfs
 
 # 3. Reboot
 sudo reboot
@@ -19,9 +19,11 @@ sudo reboot
 
 ## Binary
 
-- **Name**: `xbootsplash`
-- **Size**: ~74 KB
-- **Dependencies**: None (freestanding)
+- **Name**: `xbootsplash` (fbdev) or `xbootsplash_drm` (DRM/KMS)
+- **Size**: ~70-85 KB
+- **Dependencies**: 
+  - fbdev: None (freestanding, static)
+  - DRM: libdrm (dynamic linking)
 
 ## Installation Methods
 
@@ -31,7 +33,8 @@ sudo reboot
 
 **Usage**:
 ```bash
-sudo ./splashboot_install.sh --method standard
+./build_anim.sh /path/to/frames
+# Select option 1 in the installation menu
 ```
 
 **What it does**:
@@ -45,13 +48,24 @@ sudo ./splashboot_install.sh --method standard
 - ✓ Persists across kernel updates
 - ✓ No bootloader configuration needed
 
-### Method 2: Custom (Advanced)
+### Method 2: Install Existing Binary
+
+**For**: Re-installing a previously built binary
+
+**Usage**:
+```bash
+./build_anim.sh
+# Select option 2: Install existing xbs_* binary
+```
+
+### Method 3: Custom Initramfs (Advanced)
 
 **For**: Custom initramfs, non-Debian systems
 
 **Usage**:
 ```bash
-sudo ./splashboot_install.sh --method custom --initramfs-dir /boot/initramfs-custom
+./build_anim.sh /path/to/frames
+# Select option 2 (Custom) in installation menu
 ```
 
 **Requires**:
@@ -64,7 +78,7 @@ sudo ./splashboot_install.sh --method custom --initramfs-dir /boot/initramfs-cus
 - Linux x86_64
 - GCC compiler
 - libpng (for frame generation)
-- Root privileges
+- Root privileges (for installation)
 - `initramfs-tools` (standard method)
 
 ## Plymouth Conflict
@@ -78,26 +92,28 @@ sudo apt remove --purge plymouth plymouth-themes
 
 ### Custom Images
 
-1. Prepare 64×64 PNG images (black background)
+1. Prepare PNG images (any resolution, black background recommended)
 2. Name: `frame_00.png`, `frame_01.png`, ...
-3. Generate:
-   ```bash
-   make frames
-   make
-   ```
+3. Run: `./build_anim.sh /path/to/frames`
 
 ### Animation Parameters
 
-Edit `splash_anim_delta.c`:
-```c
-#define FRAME_DURATION_MS 33  // Speed
-#define VERTICAL_OFFSET  80   // Position
-```
+Configured interactively in build_anim.sh:
+- Frame delay (FPS)
+- Position offsets
+- Background color
+- Loop mode
 
 ## Uninstallation
 
 ```bash
-sudo ./splashboot_install.sh --method uninstall
+./build_anim.sh
+# Select option 3: Uninstall bootsplash
+```
+
+Or directly:
+```bash
+sudo ./build_anim.sh --uninstall-only
 ```
 
 This removes:

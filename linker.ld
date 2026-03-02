@@ -28,8 +28,6 @@ SECTIONS
         __bss_end = .;
     }
     
-    __stack_top = 0x500000;
-    
     /DISCARD/ : {
         *(.comment)
         *(.note*)

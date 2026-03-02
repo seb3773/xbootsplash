@@ -66,8 +66,8 @@ TARGET_RES=""
 LOOP_MODE=1  # 0=no loop, 1=full loop, 2=partial loop
 LOOP_START=0  # Start frame for partial loop
 
-# DRM vs fbdev mode
-USE_DRM=0  # 0=fbdev, 1=DRM
+# DRM vs fbdev mode (can be overridden via environment: USE_DRM=1 ./build_anim.sh)
+USE_DRM="${USE_DRM:-0}"  # 0=fbdev, 1=DRM
 LIBDRM_AVAILABLE=0
 
 # Screen dimensions (detected or specified)
@@ -94,6 +94,9 @@ show_help() {
 }
 
 # Parse options
+INSTALL_EXISTING=""
+UNINSTALL_ONLY=""
+
 while [[ $# -gt 0 ]]; do
     case $1 in
         -h|--help)
@@ -101,17 +104,13 @@ while [[ $# -gt 0 ]]; do
             ;;
         --install-existing)
             # Internal: install existing binary (called with sudo)
-            BINARY="$2"
+            INSTALL_EXISTING="$2"
             shift 2
-            # Source the script again to get functions, then install
-            check_plymouth
-            install_standard
-            exit 0
             ;;
         --uninstall-only)
             # Internal: uninstall only (called with sudo)
-            do_uninstall
-            exit 0
+            UNINSTALL_ONLY="1"
+            shift
             ;;
         -m|--mode)
             DISPLAY_MODE="$2"
@@ -460,12 +459,10 @@ check_dependencies() {
         fi
     fi
     
-    # libpng for generator
-    if ! dpkg -l libpng-dev 2>/dev/null | grep -q '^ii' 2>/dev/null; then
-        if ! ld -lpng 2>/dev/null; then
-            missing+=("libpng-dev")
-            missing_pkgs+=("libpng-dev")
-        fi
+    # libpng for generator (cross-distro: use ld check instead of dpkg)
+    if ! ld -lpng -o /dev/null 2>/dev/null; then
+        missing+=("libpng-dev")
+        missing_pkgs+=("libpng-dev")
     fi
     
     # Check for missing essential dependencies
@@ -503,7 +500,7 @@ check_dependencies() {
                     make) command -v make &> /dev/null || still_missing+=("$dep") ;;
                     ImageMagick*|convert) command -v convert &> /dev/null || still_missing+=("$dep") ;;
                     identify) command -v identify &> /dev/null || still_missing+=("$dep") ;;
-                    libpng-dev) ld -lpng 2>/dev/null || still_missing+=("$dep") ;;
+                    libpng-dev) ld -lpng -o /dev/null 2>/dev/null || still_missing+=("$dep") ;;
                     *) still_missing+=("$dep") ;;
                 esac
             done
@@ -561,16 +558,16 @@ install_sstrip() {
     
     # Check for git or wget
     if command -v git &> /dev/null; then
-        git clone https://github.com/aunali1/super-strip.git "$tmpdir/super-strip" 2>/dev/null
+        git clone https://github.com/aunali1/super-strip.git "$tmpdir/super-strip" 2>/dev/null || true
         sstrip_bin="$tmpdir/super-strip/sstrip"
     elif command -v wget &> /dev/null; then
         # Download prebuilt if available, or source
-        wget -q "https://github.com/aunali1/super-strip/archive/refs/heads/master.tar.gz" -O "$tmpdir/sstrip.tar.gz" 2>/dev/null
-        tar -xzf "$tmpdir/sstrip.tar.gz" -C "$tmpdir" 2>/dev/null
+        wget -q "https://github.com/aunali1/super-strip/archive/refs/heads/master.tar.gz" -O "$tmpdir/sstrip.tar.gz" 2>/dev/null || true
+        tar -xzf "$tmpdir/sstrip.tar.gz" -C "$tmpdir" 2>/dev/null || true
         sstrip_bin="$tmpdir/super-strip-master/sstrip"
     elif command -v curl &> /dev/null; then
-        curl -sL "https://github.com/aunali1/super-strip/archive/refs/heads/master.tar.gz" -o "$tmpdir/sstrip.tar.gz" 2>/dev/null
-        tar -xzf "$tmpdir/sstrip.tar.gz" -C "$tmpdir" 2>/dev/null
+        curl -sL "https://github.com/aunali1/super-strip/archive/refs/heads/master.tar.gz" -o "$tmpdir/sstrip.tar.gz" 2>/dev/null || true
+        tar -xzf "$tmpdir/sstrip.tar.gz" -C "$tmpdir" 2>/dev/null || true
         sstrip_bin="$tmpdir/super-strip-master/sstrip"
     else
         print_error "Need git, wget, or curl to download sstrip"
@@ -583,25 +580,35 @@ install_sstrip() {
         local srcdir="$tmpdir/super-strip"
         [ -d "$tmpdir/super-strip-master" ] && srcdir="$tmpdir/super-strip-master"
         
-        # Build sstrip
-        cd "$srcdir"
-        if make 2>/dev/null; then
-            # Install to /usr/local/bin
-            sudo mkdir -p /usr/local/bin
-            sudo cp sstrip /usr/local/bin/sstrip
-            sudo chmod +x /usr/local/bin/sstrip
-            
-            # Verify
-            if command -v sstrip &> /dev/null || [ -x "/usr/local/bin/sstrip" ]; then
-                print_success "sstrip installed to /usr/local/bin/sstrip"
+        # Build sstrip in subshell to preserve working directory
+        (
+            cd "$srcdir" || exit 1
+            if make 2>/dev/null; then
+                # Install to /usr/local/bin
+                sudo mkdir -p /usr/local/bin
+                sudo cp sstrip /usr/local/bin/sstrip
+                sudo chmod +x /usr/local/bin/sstrip
+                
+                # Verify
+                if command -v sstrip &> /dev/null || [ -x "/usr/local/bin/sstrip" ]; then
+                    echo "SUCCESS: sstrip installed to /usr/local/bin/sstrip"
+                else
+                    echo "WARNING: sstrip built but installation failed"
+                fi
             else
-                print_warning "sstrip built but installation failed"
+                echo "ERROR: Failed to build sstrip"
+                echo "INFO: You may need to install build-essential or base-devel"
+                exit 1
             fi
+        )
+        local build_result=$?
+        
+        if [ $build_result -eq 0 ]; then
+            print_success "sstrip installed to /usr/local/bin/sstrip"
         else
             print_error "Failed to build sstrip"
             print_info "You may need to install build-essential or base-devel"
         fi
-        cd - > /dev/null
     else
         print_error "Failed to download sstrip source"
     fi
@@ -1002,6 +1009,14 @@ get_parameters() {
     
     # Frame delay for animation modes
     if [ $DISPLAY_MODE -le 2 ]; then
+        # Count frames for loop start validation
+        if [ -d "$FRAME_DIR" ]; then
+            local frames_list=($(find "$FRAME_DIR" -maxdepth 1 -name "*.png" -type f 2>/dev/null | sort))
+            local frame_count=${#frames_list[@]}
+        else
+            local frame_count=0
+        fi
+        
         echo -e "\n${BOLD}Animation timing:${NC}"
         echo -e "  ${CYAN}Valid range: 1-1000 ms (1=1000 FPS max, 1000=1 FPS min)${NC}"
         echo -en "  Frame delay (ms) [${CYAN}$FRAME_DELAY${NC}]: "
@@ -1117,44 +1132,47 @@ build_animation() {
         print_success "Generator compiled"
     fi
     
-    # Build generator command
-    local GEN_CMD="./generate_splash -m $DISPLAY_MODE -x $FRAME_OFFSET_X -y $FRAME_OFFSET_Y -c $BG_COLOR"
+    # Build generator arguments as array (safer than string with eval)
+    local GEN_ARGS=()
+    GEN_ARGS+=(-m "$DISPLAY_MODE")
+    GEN_ARGS+=(-x "$FRAME_OFFSET_X")
+    GEN_ARGS+=(-y "$FRAME_OFFSET_Y")
+    GEN_ARGS+=(-c "$BG_COLOR")
     
     # Add mode-specific options
     # Modes 1 and 2: background image
     if [ $DISPLAY_MODE -eq 1 ] || [ $DISPLAY_MODE -eq 2 ]; then
-        GEN_CMD="$GEN_CMD -b $BG_IMAGE"
+        GEN_ARGS+=(-b "$BG_IMAGE")
     fi
     
     # Mode 2 (fullscreen anim): target resolution
     if [ $DISPLAY_MODE -eq 2 ] && [ -n "$TARGET_RES" ]; then
-        GEN_CMD="$GEN_CMD -r $TARGET_RES"
+        GEN_ARGS+=(-r "$TARGET_RES")
     fi
     
     # Mode 4 (static fullscreen): target resolution
     if [ $DISPLAY_MODE -eq 4 ] && [ -n "$TARGET_RES" ]; then
-        GEN_CMD="$GEN_CMD -r $TARGET_RES"
+        GEN_ARGS+=(-r "$TARGET_RES")
     fi
     
     # Add frame delay for animation modes (0, 1, 2)
     if [ $DISPLAY_MODE -le 2 ]; then
-        GEN_CMD="$GEN_CMD -d $FRAME_DELAY"
-        GEN_CMD="$GEN_CMD -l $LOOP_MODE"
+        GEN_ARGS+=(-d "$FRAME_DELAY")
+        GEN_ARGS+=(-l "$LOOP_MODE")
         if [ $LOOP_MODE -eq 2 ]; then
-            GEN_CMD="$GEN_CMD -L $LOOP_START"
+            GEN_ARGS+=(-L "$LOOP_START")
         fi
         
         # Always use auto compression (tests all methods and picks best)
-        COMPRESS_METHOD="auto"
-        GEN_CMD="$GEN_CMD -z $COMPRESS_METHOD"
+        GEN_ARGS+=(-z auto)
     fi
     
     # Add input path
-    GEN_CMD="$GEN_CMD \"$FRAME_DIR\""
+    GEN_ARGS+=("$FRAME_DIR")
     
-    # Generate frames header
+    # Generate frames header (direct call, no eval)
     print_info "⚙ Generating splash data..."
-    if ! eval "$GEN_CMD" > frames_delta.h 2>build.log; then
+    if ! ./generate_splash "${GEN_ARGS[@]}" > frames_delta.h 2>build.log; then
         print_error "Splash generation failed"
         cat build.log
         exit 1
@@ -1575,12 +1593,89 @@ install_standard() {
     echo -e "${GREEN}=== Installing via initramfs-tools (Standard Method) ===${NC}"
     echo ""
     
+    # Auto-detect DRM mode from binary if not set
+    if [[ -z "$USE_DRM" ]] && [[ -n "$BINARY" ]]; then
+        if ldd "$BINARY" 2>/dev/null | grep -q libdrm; then
+            USE_DRM=1
+        else
+            USE_DRM=0
+        fi
+    fi
+    
     # Check initramfs-tools
     if [[ ! -d /etc/initramfs-tools ]]; then
         echo -e "${RED}ERROR: initramfs-tools not found${NC}"
         echo "Install with: sudo apt install initramfs-tools"
         exit 1
     fi
+    
+    # Track installed files for rollback
+    local installed_files=(
+        "/sbin/$BINARY"
+        "/etc/initramfs-tools/hooks/$BINARY"
+        "/etc/initramfs-tools/scripts/init-top/$BINARY"
+        "/etc/initramfs-tools/scripts/init-bottom/$BINARY"
+    )
+    local backup_files=(
+        "/sbin/${BINARY}.bak"
+        "/etc/initramfs-tools/hooks/${BINARY}.bak"
+        "/etc/initramfs-tools/scripts/init-top/${BINARY}.bak"
+        "/etc/initramfs-tools/scripts/init-bottom/${BINARY}.bak"
+    )
+    local grub_backup=""
+    
+    # Store current initramfs size for integrity check
+    local current_kernel=$(uname -r)
+    local initramfs_path="/boot/initrd.img-${current_kernel}"
+    local old_initramfs_size=0
+    if [[ -f "$initramfs_path" ]]; then
+        old_initramfs_size=$(stat -c%s "$initramfs_path" 2>/dev/null || echo 0)
+    fi
+    
+    # Track installation progress for partial rollback
+    local install_step=0
+    local install_completed=0
+    
+    # Rollback function for trap handler
+    install_rollback() {
+        local exit_code=$?
+        # Only rollback if installation wasn't completed
+        if [[ $install_completed -eq 0 ]]; then
+            echo ""
+            echo -e "${YELLOW}⚠ Installation interrupted at step $install_step. Rolling back...${NC}"
+            
+            # Remove installed files based on how far we got
+            for f in "${installed_files[@]}"; do
+                if [[ -f "$f" ]]; then
+                    rm -f "$f"
+                    echo "  -> Removed $f"
+                fi
+            done
+            
+            # Restore backups if they existed
+            for i in "${!backup_files[@]}"; do
+                if [[ -f "${backup_files[$i]}" ]]; then
+                    mv "${backup_files[$i]}" "${installed_files[$i]}"
+                    echo "  -> Restored ${installed_files[$i]} from backup"
+                fi
+            done
+            
+            # Restore grub.cfg if backed up
+            if [[ -n "$grub_backup" && -f "$grub_backup" ]]; then
+                if [[ -f /boot/grub/grub.cfg ]]; then
+                    mv "$grub_backup" /boot/grub/grub.cfg
+                    echo "  -> Restored /boot/grub/grub.cfg from backup"
+                fi
+            fi
+            
+            echo -e "${RED}=== Installation Aborted ===${NC}"
+            echo "System restored to previous state."
+        fi
+        exit $exit_code
+    }
+    
+    # Set trap for rollback on error or interrupt (catches set -e failures)
+    trap 'install_rollback' ERR INT TERM EXIT
     
     echo -e "${BLUE}This method:${NC}"
     echo "  ✓ Safe with LUKS, LVM, mdadm, resume"
@@ -1591,7 +1686,17 @@ install_standard() {
     
     # Create hook script
     echo -e "${GREEN}[1/4]⚙ Creating initramfs-tools hook...${NC}"
+    install_step=1
     mkdir -p /etc/initramfs-tools/hooks
+    
+    # Backup existing hook BEFORE writing new one
+    if [[ -f /etc/initramfs-tools/hooks/${BINARY}.bak ]]; then
+        rm /etc/initramfs-tools/hooks/${BINARY}.bak
+    fi
+    if [[ -f /etc/initramfs-tools/hooks/$BINARY ]]; then
+        cp /etc/initramfs-tools/hooks/$BINARY /etc/initramfs-tools/hooks/${BINARY}.bak
+        echo "  -> Backed up existing hook"
+    fi
     
     # Determine mode string for comment
     local mode_str="fbdev"
@@ -1599,7 +1704,9 @@ install_standard() {
         mode_str="DRM/KMS"
     fi
     
-    cat > /etc/initramfs-tools/hooks/$BINARY << HOOK_EOF
+    # Atomic write: write to temp file then rename
+    local hook_tmp="/etc/initramfs-tools/hooks/${BINARY}.tmp"
+    cat > "$hook_tmp" << HOOK_EOF
 #!/bin/sh
 # initramfs-tools hook for $BINARY bootsplash animation
 # Mode: $mode_str
@@ -1616,7 +1723,7 @@ HOOK_EOF
 
     # Add mode-specific device setup (must be outside heredoc for variable expansion)
     if [[ $USE_DRM -eq 0 ]]; then
-        cat >> /etc/initramfs-tools/hooks/$BINARY << 'HOOK_FBDEV'
+        cat >> "$hook_tmp" << 'HOOK_FBDEV'
 
 # For fbdev mode: ensure framebuffer device node
 if [ ! -e "${DESTDIR}/dev/fb0" ]; then
@@ -1624,41 +1731,107 @@ if [ ! -e "${DESTDIR}/dev/fb0" ]; then
 fi
 HOOK_FBDEV
     else
-        cat >> /etc/initramfs-tools/hooks/$BINARY << 'HOOK_DRM'
+        cat >> "$hook_tmp" << 'HOOK_DRM'
 
 # For DRM mode: ensure DRI directory exists
 mkdir -p "${DESTDIR}/dev/dri" 2>/dev/null || true
 HOOK_DRM
     fi
     
-    cat >> /etc/initramfs-tools/hooks/$BINARY << 'HOOK_END'
+    cat >> "$hook_tmp" << 'HOOK_END'
 
 # End of hook
 HOOK_END
 
-    chmod +x /etc/initramfs-tools/hooks/$BINARY
+    # Atomic rename
+    chmod +x "$hook_tmp"
+    mv "$hook_tmp" /etc/initramfs-tools/hooks/$BINARY
     echo "  -> /etc/initramfs-tools/hooks/$BINARY"
     
     # Copy binary to /sbin
     echo -e "${GREEN}[2/4]⚙ Installing binary to /sbin...${NC}"
+    install_step=2
+    
+    # Validate binary before installation
+    if [[ ! -f "$BINARY" ]]; then
+        echo -e "  ${RED}✗ Binary not found: $BINARY${NC}"
+        return 1
+    fi
+    
+    # Check ELF format and architecture
+    local file_info
+    file_info=$(file "$BINARY" 2>/dev/null)
+    
+    if ! echo "$file_info" | grep -q "ELF"; then
+        echo -e "  ${RED}✗ Not a valid ELF binary${NC}"
+        return 1
+    fi
+    
+    if ! echo "$file_info" | grep -q "x86-64"; then
+        echo -e "  ${RED}✗ Binary is not x86-64 architecture${NC}"
+        return 1
+    fi
+    
+    # Check mode consistency (DRM vs fbdev)
+    local is_drm_binary=0
+    if ldd "$BINARY" 2>/dev/null | grep -q libdrm; then
+        is_drm_binary=1
+    fi
+    
+    if [[ $is_drm_binary -eq 1 && $USE_DRM -eq 0 ]]; then
+        echo -e "  ${YELLOW}⚠ Warning: Binary links to libdrm but installing as fbdev mode${NC}"
+    elif [[ $is_drm_binary -eq 0 && $USE_DRM -eq 1 ]]; then
+        echo -e "  ${YELLOW}⚠ Warning: Binary is static (fbdev) but installing as DRM mode${NC}"
+    fi
+    
+    # For fbdev mode, verify static linking
+    if [[ $USE_DRM -eq 0 ]]; then
+        if ldd "$BINARY" 2>&1 | grep -q "Not a valid dynamic executable"; then
+            echo "  -> Binary is statically linked (OK for fbdev)"
+        elif ldd "$BINARY" 2>/dev/null | grep -q libdrm; then
+            echo -e "  ${YELLOW}⚠ Warning: fbdev binary should be static, but links to libdrm${NC}"
+        else
+            echo "  -> Binary dependencies OK"
+        fi
+    fi
+    
+    echo "  -> Binary validated: $(echo "$file_info" | grep -oP 'ELF.*x86-64')"
+    
     # Backup existing binary if present
     if [[ -f /sbin/$BINARY ]]; then
         cp /sbin/$BINARY /sbin/${BINARY}.bak
         echo "  -> Backed up existing binary to /sbin/${BINARY}.bak"
     fi
-    cp "$BINARY" /sbin/$BINARY
-    chmod +x /sbin/$BINARY
+    # Atomic write: copy to temp then rename
+    cp "$BINARY" /sbin/${BINARY}.tmp
+    chmod +x /sbin/${BINARY}.tmp
+    mv /sbin/${BINARY}.tmp /sbin/$BINARY
     echo "  -> /sbin/$BINARY"
     
     # Create init-top script (starts splash early)
     echo -e "${GREEN}[3/4]⚙ Creating init-top script...${NC}"
+    install_step=3
     mkdir -p /etc/initramfs-tools/scripts/init-top
-    cat > /etc/initramfs-tools/scripts/init-top/$BINARY << INIT_TOP_EOF
+    # Backup existing init-top script if present
+    if [[ -f /etc/initramfs-tools/scripts/init-top/$BINARY ]]; then
+        cp /etc/initramfs-tools/scripts/init-top/$BINARY /etc/initramfs-tools/scripts/init-top/${BINARY}.bak
+        echo "  -> Backed up existing init-top script"
+    fi
+    
+    # Set PREREQ based on mode: fbdev needs no udev, DRM needs udev for /dev/dri/card*
+    local prereq_str=""
+    if [[ $USE_DRM -eq 1 ]]; then
+        prereq_str="udev"
+    fi
+    
+    # Atomic write: write to temp then rename
+    local inittop_tmp="/etc/initramfs-tools/scripts/init-top/${BINARY}.tmp"
+    cat > "$inittop_tmp" << INIT_TOP_EOF
 #!/bin/sh
 # Start $BINARY animation early in boot
 # This runs after /dev is mounted, before root filesystem
 
-PREREQ="udev"
+PREREQ="$prereq_str"
 prereqs() { echo "\$PREREQ"; }
 case "\$1" in prereqs) prereqs; exit 0;; esac
 
@@ -1671,13 +1844,22 @@ if [ -x /sbin/$BINARY ]; then
     echo "\$SPLASH_PID" > /run/${BINARY}.pid
 fi
 INIT_TOP_EOF
-    chmod +x /etc/initramfs-tools/scripts/init-top/$BINARY
+    chmod +x "$inittop_tmp"
+    mv "$inittop_tmp" /etc/initramfs-tools/scripts/init-top/$BINARY
     echo "  -> /etc/initramfs-tools/scripts/init-top/$BINARY"
     
     # Create init-bottom script (stops splash before switch_root)
     echo -e "${GREEN}[4/4]⚙ Creating init-bottom script...${NC}"
+    install_step=4
     mkdir -p /etc/initramfs-tools/scripts/init-bottom
-    cat > /etc/initramfs-tools/scripts/init-bottom/$BINARY << INIT_BOTTOM_EOF
+    # Backup existing init-bottom script if present
+    if [[ -f /etc/initramfs-tools/scripts/init-bottom/$BINARY ]]; then
+        cp /etc/initramfs-tools/scripts/init-bottom/$BINARY /etc/initramfs-tools/scripts/init-bottom/${BINARY}.bak
+        echo "  -> Backed up existing init-bottom script"
+    fi
+    # Atomic write: write to temp then rename
+    local initbottom_tmp="/etc/initramfs-tools/scripts/init-bottom/${BINARY}.tmp"
+    cat > "$initbottom_tmp" << INIT_BOTTOM_EOF
 #!/bin/sh
 # Stop $BINARY before switching to real root
 
@@ -1687,18 +1869,32 @@ case "\$1" in prereqs) prereqs; exit 0;; esac
 
 . /scripts/functions
 
-# Stop splash animation
+# Stop splash animation safely
+# Verify process name before killing to avoid PID recycling race
 if [ -f /run/${BINARY}.pid ]; then
-    kill \$(cat /run/${BINARY}.pid) 2>/dev/null || true
+    PID=\$(cat /run/${BINARY}.pid 2>/dev/null)
+    if [ -n "\$PID" ] && [ -d "/proc/\$PID" ]; then
+        # Verify this is actually our binary (avoid PID recycling)
+        COMM=\$(cat /proc/\$PID/comm 2>/dev/null)
+        if [ "\$COMM" = "$BINARY" ]; then
+            kill "\$PID" 2>/dev/null || true
+        fi
+    fi
     rm -f /run/${BINARY}.pid
 fi
 
-# Clear framebuffer to black before handoff
+# Restore CRTC for DRM mode (handles SIGKILL case)
+if [ -x /sbin/$BINARY ]; then
+    /sbin/$BINARY --restore-crtc 2>/dev/null || true
+fi
+
+# Clear framebuffer to black before handoff (fbdev mode)
 if [ -c /dev/fb0 ]; then
     dd if=/dev/zero of=/dev/fb0 2>/dev/null || true
 fi
 INIT_BOTTOM_EOF
-    chmod +x /etc/initramfs-tools/scripts/init-bottom/$BINARY
+    chmod +x "$initbottom_tmp"
+    mv "$initbottom_tmp" /etc/initramfs-tools/scripts/init-bottom/$BINARY
     echo "  -> /etc/initramfs-tools/scripts/init-bottom/$BINARY"
     
     # Check disk space on /boot before rebuilding initramfs
@@ -1738,52 +1934,57 @@ INIT_BOTTOM_EOF
         echo -e "  -> ${free_mb}MB available (OK)"
     fi
     
-    # Track installed files for potential rollback
-    local installed_files=(
-        "/sbin/$BINARY"
-        "/etc/initramfs-tools/hooks/$BINARY"
-        "/etc/initramfs-tools/scripts/init-top/$BINARY"
-        "/etc/initramfs-tools/scripts/init-bottom/$BINARY"
-    )
-    local backup_files=(
-        "/sbin/${BINARY}.bak"
-        "/etc/initramfs-tools/hooks/${BINARY}.bak"
-        "/etc/initramfs-tools/scripts/init-top/${BINARY}.bak"
-        "/etc/initramfs-tools/scripts/init-bottom/${BINARY}.bak"
-    )
-    
     # Rebuild initramfs
     echo ""
     echo -e "${GREEN}⚙ Rebuilding initramfs...${NC}"
-    if update-initramfs -u; then
-        echo "  -> Done"
-    else
+    if ! update-initramfs -u; then
         echo -e "  -> ${RED}✖ FAILED!${NC}"
-        echo ""
-        echo -e "${YELLOW}⚠ update-initramfs failed. Rolling back installation...${NC}"
-        
-        # Remove installed files
-        for f in "${installed_files[@]}"; do
-            if [[ -f "$f" ]]; then
-                rm -f "$f"
-                echo "  -> Removed $f"
-            fi
-        done
-        
-        # Restore backups if they existed
-        for i in "${!backup_files[@]}"; do
-            if [[ -f "${backup_files[$i]}" ]]; then
-                mv "${backup_files[$i]}" "${installed_files[$i]}"
-                echo "  -> Restored ${installed_files[$i]} from backup"
-            fi
-        done
-        
-        echo ""
-        echo -e "${RED}=== Installation Aborted ===${NC}"
-        echo "System restored to previous state."
-        echo "Check disk space and kernel version, then try again."
+        install_rollback
         return 1
     fi
+    echo "  -> Done"
+    
+    # Verify initramfs integrity
+    echo -e "${GREEN}☉ Verifying initramfs integrity...${NC}"
+    local new_initramfs_size=$(stat -c%s "$initramfs_path" 2>/dev/null || echo 0)
+    
+    # Check that new initramfs exists and is reasonable size
+    if [[ ! -f "$initramfs_path" ]]; then
+        echo -e "  -> ${RED}✖ Initramfs file not found: $initramfs_path${NC}"
+        install_rollback
+        return 1
+    fi
+    
+    # Check for significant size reduction (could indicate corruption)
+    if [[ $old_initramfs_size -gt 0 && $new_initramfs_size -lt $((old_initramfs_size / 2)) ]]; then
+        echo -e "  -> ${YELLOW}⚠ Warning: New initramfs is significantly smaller${NC}"
+        echo "     Old: $old_initramfs_size bytes"
+        echo "     New: $new_initramfs_size bytes"
+        echo "     This could indicate corruption or missing modules."
+    fi
+    
+    # Verify initramfs is readable (basic integrity check)
+    if ! zcat "$initramfs_path" >/dev/null 2>&1 && ! unlz4 "$initramfs_path" >/dev/null 2>&1; then
+        echo -e "  -> ${RED}✖ Initramfs appears corrupted (cannot decompress)${NC}"
+        install_rollback
+        return 1
+    fi
+    
+    # Check that our binary is in the initramfs
+    if command -v lsinitramfs &>/dev/null; then
+        if lsinitramfs "$initramfs_path" 2>/dev/null | grep -q "sbin/$BINARY"; then
+            echo -e "  -> ${GREEN}✓ Binary included in initramfs${NC}"
+        else
+            echo -e "  -> ${YELLOW}⚠ Warning: Binary not found in initramfs${NC}"
+            echo "     Check hook script: /etc/initramfs-tools/hooks/$BINARY"
+        fi
+    else
+        echo -e "  -> Initramfs size: $new_initramfs_size bytes (OK)"
+    fi
+    
+    # Clear trap - installation successful
+    install_completed=1
+    trap - ERR INT TERM EXIT
     
     # Check framebuffer availability
     echo ""
@@ -1803,9 +2004,24 @@ INIT_BOTTOM_EOF
         read -p "Run update-grub now? [Y/n] " -n 1 -r
         echo ""
         if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+            # Backup grub.cfg before modification
+            if [[ -f /boot/grub/grub.cfg ]]; then
+                grub_backup="/boot/grub/grub.cfg.bak.$$"
+                cp /boot/grub/grub.cfg "$grub_backup"
+                echo "  -> Backed up grub.cfg to $grub_backup"
+            fi
             echo -e "${GREEN}⚙ Updating GRUB...${NC}"
-            update-grub
-            echo "  -> Done"
+            if update-grub; then
+                echo "  -> Done"
+                # Remove backup on success
+                rm -f "$grub_backup"
+                grub_backup=""
+            else
+                echo -e "  ${RED}✗ update-grub failed${NC}"
+                if [[ -f "$grub_backup" ]]; then
+                    echo -e "  ${YELLOW}⚠ grub.cfg backup available at: $grub_backup${NC}"
+                fi
+            fi
         fi
     fi
     
@@ -1956,6 +2172,15 @@ install_shutdown() {
     echo -e "${GREEN}=== Installing Shutdown Splash (systemd-shutdown) ===${NC}"
     echo ""
     
+    # Auto-detect DRM mode from binary if not set
+    if [[ -z "$USE_DRM" ]] && [[ -n "$BINARY" ]]; then
+        if ldd "$BINARY" 2>/dev/null | grep -q libdrm; then
+            USE_DRM=1
+        else
+            USE_DRM=0
+        fi
+    fi
+    
     echo -e "${BLUE}This method:${NC}"
     echo "  ✓ Ultra-minimal: no systemd unit, no dependencies"
     echo "  ✓ Executes at the very last moment before poweroff/reboot"
@@ -2020,7 +2245,7 @@ if [ -x /usr/local/sbin/xbs_* ]; then
             SPLASH_PID=$!
             # Give animation time to run (systemd may kill abruptly)
             sleep 2
-            wait $SPLASH_PID 2>/dev/null
+            wait $SPLASH_PID 2>/dev/null || true
             break
         fi
     done
@@ -2090,12 +2315,64 @@ do_uninstall() {
         echo ""
         
         # Ask which to remove or remove all
-        echo -n "➤ Remove all? [Y/n]: "
-        read -r remove_all
-        case "$remove_all" in
+        echo -n "➤ Remove all? [Y/n/s for selective]: "
+        read -r remove_choice
+        case "$remove_choice" in
             [nN])
                 echo "Cancelling uninstall."
                 return 0
+                ;;
+            [sS])
+                # Selective removal - choose which binary to remove
+                echo ""
+                echo "Select which binary to remove:"
+                local idx=1
+                local all_bins=()
+                for bin in "${installed_binaries[@]}"; do
+                    echo "  $idx) $bin (boot)"
+                    all_bins+=("$bin")
+                    ((idx++))
+                done
+                for bin in "${shutdown_binaries[@]}"; do
+                    echo "  $idx) $bin (shutdown)"
+                    all_bins+=("$bin")
+                    ((idx++))
+                done
+                echo "  0) Cancel"
+                echo ""
+                echo -n "➤ Enter number: "
+                read -r selection
+                if [[ "$selection" =~ ^[0-9]+$ ]] && [[ "$selection" -ge 1 ]] && [[ "$selection" -le ${#all_bins[@]} ]]; then
+                    local selected_bin="${all_bins[$((selection-1))]}"
+                    echo ""
+                    echo -e "${GREEN}Removing: $selected_bin...${NC}"
+                    
+                    # Check if it's a boot or shutdown binary
+                    if [[ " ${installed_binaries[*]} " =~ " ${selected_bin} " ]]; then
+                        # Boot binary
+                        rm -f /sbin/$selected_bin
+                        rm -f /sbin/${selected_bin}.bak 2>/dev/null || true
+                        rm -f /etc/initramfs-tools/hooks/$selected_bin 2>/dev/null || true
+                        rm -f /etc/initramfs-tools/hooks/${selected_bin}.bak 2>/dev/null || true
+                        rm -f /etc/initramfs-tools/scripts/init-top/$selected_bin 2>/dev/null || true
+                        rm -f /etc/initramfs-tools/scripts/init-top/${selected_bin}.bak 2>/dev/null || true
+                        rm -f /etc/initramfs-tools/scripts/init-bottom/$selected_bin 2>/dev/null || true
+                        rm -f /etc/initramfs-tools/scripts/init-bottom/${selected_bin}.bak 2>/dev/null || true
+                        rm -f /run/${selected_bin}.pid 2>/dev/null || true
+                        rm -f /run/${selected_bin}_crtc.info 2>/dev/null || true
+                        echo "  -> Removed boot binary and associated files"
+                        ((removed++))
+                    else
+                        # Shutdown binary
+                        rm -f /usr/local/sbin/$selected_bin
+                        rm -f /usr/local/sbin/${selected_bin}.bak 2>/dev/null || true
+                        echo "  -> Removed shutdown binary"
+                        ((removed++))
+                    fi
+                else
+                    echo "Cancelled."
+                    return 0
+                fi
                 ;;
             *)
                 # Remove boot binaries
@@ -2113,19 +2390,25 @@ do_uninstall() {
                     fi
                     
                     # Remove backup file
-                    rm -f /sbin/${bin}.bak 2>/dev/null
+                    rm -f /sbin/${bin}.bak 2>/dev/null || true
                     
-                    # Remove hook
+                    # Remove hook and its backup
                     rm -f /etc/initramfs-tools/hooks/$bin 2>/dev/null && echo "  -> Removed hook" || true
+                    rm -f /etc/initramfs-tools/hooks/${bin}.bak 2>/dev/null || true
                     
-                    # Remove init-top script
+                    # Remove init-top script and its backup
                     rm -f /etc/initramfs-tools/scripts/init-top/$bin 2>/dev/null && echo "  -> Removed init-top" || true
+                    rm -f /etc/initramfs-tools/scripts/init-top/${bin}.bak 2>/dev/null || true
                     
-                    # Remove init-bottom script
+                    # Remove init-bottom script and its backup
                     rm -f /etc/initramfs-tools/scripts/init-bottom/$bin 2>/dev/null && echo "  -> Removed init-bottom" || true
+                    rm -f /etc/initramfs-tools/scripts/init-bottom/${bin}.bak 2>/dev/null || true
                     
                     # Remove PID file
-                    rm -f /run/${bin}.pid 2>/dev/null
+                    rm -f /run/${bin}.pid 2>/dev/null || true
+                    
+                    # Remove CRTC state file (DRM mode)
+                    rm -f /run/${bin}_crtc.info 2>/dev/null || true
                     
                     ((removed++))
                 done
@@ -2135,7 +2418,7 @@ do_uninstall() {
                     echo -e "${GREEN}Removing shutdown splash: $bin...${NC}"
                     rm -f /usr/local/sbin/$bin
                     echo "  -> Removed /usr/local/sbin/$bin"
-                    rm -f /usr/local/sbin/${bin}.bak 2>/dev/null
+                    rm -f /usr/local/sbin/${bin}.bak 2>/dev/null || true
                     ((removed++))
                 done
                 
@@ -2349,10 +2632,9 @@ install_animation() {
             if [[ $EUID -ne 0 ]]; then
                 print_info "✜ This option requires root privileges"
                 print_info "✜ Re-running with sudo..."
-                local sudo_args=("-m" "$DISPLAY_MODE" "-x" "$FRAME_OFFSET_X" "-y" "$FRAME_OFFSET_Y" "-c" "$BG_COLOR")
-                [[ -n "$BG_IMAGE" ]] && sudo_args+=("-b" "$BG_IMAGE")
-                [[ -n "$TARGET_RES" ]] && sudo_args+=("-r" "$TARGET_RES")
-                exec sudo "$0" "${sudo_args[@]}" "$FRAME_DIR"
+                # Convert BINARY to absolute path to avoid CWD issues under sudo
+                local abs_binary="$(cd "$(dirname "$BINARY")" 2>/dev/null && pwd)/$(basename "$BINARY")"
+                exec sudo "$0" --install-existing "$abs_binary"
             fi
             install_shutdown
             ;;
@@ -2361,10 +2643,9 @@ install_animation() {
             if [[ $EUID -ne 0 ]]; then
                 print_info "✜ This option requires root privileges"
                 print_info "✜ Re-running with sudo..."
-                local sudo_args=("-m" "$DISPLAY_MODE" "-x" "$FRAME_OFFSET_X" "-y" "$FRAME_OFFSET_Y" "-c" "$BG_COLOR")
-                [[ -n "$BG_IMAGE" ]] && sudo_args+=("-b" "$BG_IMAGE")
-                [[ -n "$TARGET_RES" ]] && sudo_args+=("-r" "$TARGET_RES")
-                exec sudo "$0" "${sudo_args[@]}" "$FRAME_DIR"
+                # Convert BINARY to absolute path to avoid CWD issues under sudo
+                local abs_binary="$(cd "$(dirname "$BINARY")" 2>/dev/null && pwd)/$(basename "$BINARY")"
+                exec sudo "$0" --install-existing "$abs_binary"
             fi
             echo ""
             echo -e "${CYAN}═══════════════════════════════════════${NC}"
@@ -2407,10 +2688,8 @@ install_boot_menu() {
             if [[ $EUID -ne 0 ]]; then
                 print_info "✜ This option requires root privileges"
                 print_info "✜ Re-running with sudo..."
-                local sudo_args=("-m" "$DISPLAY_MODE" "-x" "$FRAME_OFFSET_X" "-y" "$FRAME_OFFSET_Y" "-c" "$BG_COLOR")
-                [[ -n "$BG_IMAGE" ]] && sudo_args+=("-b" "$BG_IMAGE")
-                [[ -n "$TARGET_RES" ]] && sudo_args+=("-r" "$TARGET_RES")
-                exec sudo "$0" "${sudo_args[@]}" "$FRAME_DIR"
+                local abs_binary="$(cd "$(dirname "$BINARY")" 2>/dev/null && pwd)/$(basename "$BINARY")"
+                exec sudo "$0" --install-existing "$abs_binary"
             fi
             check_plymouth
             install_standard
@@ -2419,10 +2698,8 @@ install_boot_menu() {
             if [[ $EUID -ne 0 ]]; then
                 print_info "✜ This option requires root privileges"
                 print_info "✜ Re-running with sudo..."
-                local sudo_args=("-m" "$DISPLAY_MODE" "-x" "$FRAME_OFFSET_X" "-y" "$FRAME_OFFSET_Y" "-c" "$BG_COLOR")
-                [[ -n "$BG_IMAGE" ]] && sudo_args+=("-b" "$BG_IMAGE")
-                [[ -n "$TARGET_RES" ]] && sudo_args+=("-r" "$TARGET_RES")
-                exec sudo "$0" "${sudo_args[@]}" "$FRAME_DIR"
+                local abs_binary="$(cd "$(dirname "$BINARY")" 2>/dev/null && pwd)/$(basename "$BINARY")"
+                exec sudo "$0" --install-existing "$abs_binary"
             fi
             check_plymouth
             install_custom
@@ -2431,7 +2708,7 @@ install_boot_menu() {
             if [[ $EUID -ne 0 ]]; then
                 print_info "✜ This option requires root privileges"
                 print_info "✜ Re-running with sudo..."
-                exec sudo "$0" -m "$DISPLAY_MODE" -x "$FRAME_OFFSET_X" -y "$FRAME_OFFSET_Y" -c "$BG_COLOR" "$FRAME_DIR"
+                exec sudo "$0" --uninstall-only
             fi
             do_uninstall
             ;;
@@ -2444,10 +2721,8 @@ install_boot_menu() {
             ;;
         *)
             if [[ $EUID -ne 0 ]]; then
-                local sudo_args=("-m" "$DISPLAY_MODE" "-x" "$FRAME_OFFSET_X" "-y" "$FRAME_OFFSET_Y" "-c" "$BG_COLOR")
-                [[ -n "$BG_IMAGE" ]] && sudo_args+=("-b" "$BG_IMAGE")
-                [[ -n "$TARGET_RES" ]] && sudo_args+=("-r" "$TARGET_RES")
-                exec sudo "$0" "${sudo_args[@]}" "$FRAME_DIR"
+                local abs_binary="$(cd "$(dirname "$BINARY")" 2>/dev/null && pwd)/$(basename "$BINARY")"
+                exec sudo "$0" --install-existing "$abs_binary"
             fi
             check_plymouth
             install_standard
@@ -2556,7 +2831,9 @@ install_existing_binary() {
     if [[ $EUID -ne 0 ]]; then
         print_info "✜ Installation requires root privileges"
         print_info "✜ Re-running with sudo..."
-        exec sudo "$0" --install-existing "$BINARY"
+        # BINARY is already an absolute path from find, but ensure it
+        local abs_binary="$(cd "$(dirname "$BINARY")" 2>/dev/null && pwd)/$(basename "$BINARY")"
+        exec sudo "$0" --install-existing "$abs_binary"
     fi
     
     # Proceed with installation
@@ -2632,7 +2909,7 @@ show_main_menu() {
         if [[ $USE_DRM -eq 1 ]]; then
             echo -e "    │  ${CYAN}T)${NC} Toggle mode (current: ${GREEN}DRM${NC})             │"
         else
-            echo -e "    │  ${$CYAN}T)${NC} Toggle mode (current: ${GREEN}fbdev${NC})           │"
+            echo -e "    │  ${CYAN}T)${NC} Toggle mode (current: ${GREEN}fbdev${NC})           │"
         fi
     fi
     echo -e "    │  ${CYAN}Q)${NC} Quit                                   │"
@@ -2742,6 +3019,27 @@ show_main_menu() {
     
     echo -e "\n${GREEN}${BOLD}✓ All done!${NC}\n"
 }
+
+# Handle deferred flags (functions must be defined before calling)
+if [ -n "$INSTALL_EXISTING" ]; then
+    BINARY="$INSTALL_EXISTING"
+    
+    # Auto-detect DRM mode from binary linkage (same as install_standard)
+    if ldd "$BINARY" 2>/dev/null | grep -q libdrm; then
+        USE_DRM=1
+    else
+        USE_DRM=0
+    fi
+    
+    check_plymouth
+    install_standard
+    exit 0
+fi
+
+if [ -n "$UNINSTALL_ONLY" ]; then
+    do_uninstall
+    exit 0
+fi
 
 # Run
 main "$@"

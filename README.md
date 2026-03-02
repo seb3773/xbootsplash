@@ -401,6 +401,20 @@ The benchmark tool automatically recommends the best method for your frames.
 | 16 bpp (RGB565) | Direct memcpy |
 | 32 bpp (XRGB8888) | 565→888 expansion (SSE2) |
 
+**Double buffering (fbdev):**
+
+When available, double buffering is automatically enabled for tear-free animation:
+- **Detection**: Runtime check for `yres_virtual >= 2 * yres`
+- **Mechanism**: `FBIOPAN_DISPLAY` + `FBIO_WAITFORVSYNC` for page flipping
+- **Fallback**: Single buffer mode if not supported
+- **Zero overhead**: Function pointer dispatch (no per-frame test)
+
+To check if your system supports double buffering:
+```bash
+cat /sys/class/graphics/fb0/virtual_size
+# Example: 1920,2160 means double buffer available (yres_virtual=2160 for yres=1080)
+```
+
 **DRM mode:**
 
 | Format | Handling |
@@ -580,7 +594,7 @@ If xbootsplash causes boot failure (black screen, freeze, or kernel panic):
 **Method 2: GRUB Init Override**
 1. Hold `Shift` during boot to show GRUB menu
 2. Press `e` to edit the selected entry
-3. Find the `linux` line and add `init=/bin/bash` at the end
+3. Find the `linux` line and add `init=/bin/sh` at the end
 4. Press `Ctrl+X` or `F10` to boot
 5. You'll get a root shell. Remount root as read-write:
    ```bash
@@ -808,7 +822,27 @@ If `/dev/fb0` is missing on a DRM system:
 | SIGTERM received | Clean exit: clear framebuffer, close resources |
 | SIGINT received | Same as SIGTERM |
 | Animation complete (no loop) | Stay on last frame, wait for signal |
-| Loop enabled | Restart from frame 0 |
+| Full loop enabled | Restart from frame 0 |
+| Partial loop enabled | Restart from LOOP_START frame |
+
+## Loop Modes
+
+xbootsplash supports 3 loop modes for animations:
+
+| Mode | Behavior | Use Case |
+|------|----------|----------|
+| **No loop** | Play once, stay on last frame | Intro animation, boot complete indicator |
+| **Full loop** | Play 0→N, restart from 0 | Continuous animation |
+| **Partial loop** | Play 0→N once, then loop from frame X to N | Intro + seamless loop |
+
+**Partial loop example** (11 frames, loop from frame 7):
+```
+First pass:  0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10
+Then loop:                     ↑←←←←←←←←←←←←←←←←←←←←←←←←|
+             7 → 8 → 9 → 10 → 7 → 8 → 9 → 10 → ...
+```
+
+This is useful for animations with an "intro" phase followed by a seamless loop.
 
 ### Error Conditions
 
@@ -1034,4 +1068,3 @@ exec switch_root /root /sbin/init
 | **cleanup** | dracut equivalent | Same as init-bottom |
 
 **Important**: Always stop the splash before `switch_root` or the process will be killed uncleanly.
-

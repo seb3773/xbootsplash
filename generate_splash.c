@@ -28,6 +28,9 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <fcntl.h>
 #include <dirent.h>
 #include <png.h>
 #include <sys/stat.h>
@@ -41,7 +44,8 @@ static int display_mode = 0;
 static int offset_x = 0;
 static int offset_y = 0;
 static int frame_delay_ms = 33;
-static int loop = 1;  /* 1=loop, 0=stay on last frame */
+static int loop_mode = 1;      /* 0=no loop, 1=full loop, 2=partial loop */
+static int loop_start = 0;     /* Start frame for partial loop */
 static uint32_t bg_color = 0x000000;  /* RRGGBB */
 static char *bg_image_path = NULL;
 static int target_w = 0;
@@ -154,22 +158,26 @@ static int compare_frames(const void *a, const void *b) {
     return ((frame_entry_t*)a)->index - ((frame_entry_t*)b)->index;
 }
 
-/* Escape shell metacharacters to prevent command injection */
-static void shell_escape(char *dst, size_t dstsize, const char *src) {
-    size_t j = 0;
-    for (size_t i = 0; src[i] && j < dstsize - 1; i++) {
-        char c = src[i];
-        /* Escape dangerous characters: $ ` " \ ' ! ; & | < > ( ) */
-        if (c == '$' || c == '`' || c == '"' || c == '\\' || c == '\'' ||
-            c == '!' || c == ';' || c == '&' || c == '|' || c == '<' ||
-            c == '>' || c == '(' || c == ')') {
-            if (j < dstsize - 2) {
-                dst[j++] = '\\';
-            }
+/* Execute command without shell interpretation (avoids injection) */
+static int exec_cmd(const char *prog, char *const argv[]) {
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    
+    if (pid == 0) {
+        /* Child: redirect stderr to /dev/null */
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) {
+            dup2(devnull, STDERR_FILENO);
+            close(devnull);
         }
-        dst[j++] = c;
+        execvp(prog, argv);
+        _exit(127);
     }
-    dst[j] = '\0';
+    
+    /* Parent: wait for child */
+    int status;
+    waitpid(pid, &status, 0);
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
 
 /* Check if PNG has transparency (alpha channel or tRNS chunk) */
@@ -207,31 +215,32 @@ static int png_has_alpha(const char *path) {
 }
 
 /* Flatten transparent PNG using imagemagick onto solid background */
-static char *flatten_png(const char *path, uint32_t bg_hex) {
-    static char tmp_path[512];
+/* Returns pointer to tmp_path buffer provided by caller (must be at least 512 bytes) */
+static char *flatten_png(const char *path, uint32_t bg_hex, char *tmp_path, size_t tmp_path_size) {
     static int counter = 0;
-    char cmd[1024];
-    char escaped_path[512];
-    char escaped_tmp[512];
     
     /* Create unique temp file path per image */
-    snprintf(tmp_path, sizeof(tmp_path), "/tmp/flatten_%d_%d.png", getpid(), counter++);
+    snprintf(tmp_path, tmp_path_size, "/tmp/flatten_%d_%d.png", getpid(), counter++);
     
     /* Build convert command: flatten onto background color */
     char bg_color_str[16];
     snprintf(bg_color_str, sizeof(bg_color_str), "#%06X", bg_hex);
     
-    shell_escape(escaped_path, sizeof(escaped_path), path);
-    shell_escape(escaped_tmp, sizeof(escaped_tmp), tmp_path);
+    /* Use exec_cmd to avoid shell injection */
+    char *argv[] = {
+        (char *)"convert",
+        (char *)path,
+        (char *)"-background",
+        bg_color_str,
+        (char *)"-flatten",
+        tmp_path,
+        NULL
+    };
     
-    snprintf(cmd, sizeof(cmd),
-             "convert \"%s\" -background \"%s\" -flatten \"%s\" 2>/dev/null",
-             escaped_path, bg_color_str, escaped_tmp);
-    
-    if (system(cmd) != 0) {
+    if (exec_cmd("convert", argv) != 0) {
         /* Fallback: just copy without flattening */
-        snprintf(cmd, sizeof(cmd), "cp \"%s\" \"%s\"", escaped_path, escaped_tmp);
-        system(cmd);
+        char *cp_argv[] = {(char *)"cp", (char *)path, tmp_path, NULL};
+        exec_cmd("cp", cp_argv);
     }
     
     return tmp_path;
@@ -240,6 +249,7 @@ static char *flatten_png(const char *path, uint32_t bg_hex) {
 /* Load PNG into RGB565 buffer */
 static int load_png(const char *path, image_t *img) {
     const char *load_path = path;
+    char flattened_buf[512];
     char *flattened_path = NULL;
     
     /* Check for transparency and flatten if needed */
@@ -249,7 +259,7 @@ static int load_png(const char *path, image_t *img) {
             fprintf(stderr, "         Flattening onto background color #%06X\n", bg_color);
             transp_warned = 1;
         }
-        flattened_path = flatten_png(path, bg_color);
+        flattened_path = flatten_png(path, bg_color, flattened_buf, sizeof(flattened_buf));
         load_path = flattened_path;
     }
     
@@ -369,9 +379,11 @@ static image_t* resize_image(const image_t *src, int new_w, int new_h) {
 }
 
 /* RLE Direct compression */
-static size_t compress_rle_direct(const uint16_t *pixels, int count, uint8_t *out) {
+/* Worst case: count * 3 + 1 bytes (each pixel unique = 1 + 2 bytes, plus terminator) */
+static size_t compress_rle_direct(const uint16_t *pixels, int count, uint8_t *out, size_t out_size) {
     size_t pos = 0;
     int i = 0;
+    const size_t max_pos = out_size > 0 ? out_size - 1 : 0;  /* Reserve space for terminator */
     
     while (i < count) {
         uint16_t val = pixels[i];
@@ -383,6 +395,8 @@ static size_t compress_rle_direct(const uint16_t *pixels, int count, uint8_t *ou
         }
         
         if (run >= 3) {
+            /* RLE: 3 bytes */
+            if (pos + 3 > max_pos) goto overflow;
             out[pos++] = 0x80 | run;
             out[pos++] = val & 0xFF;
             out[pos++] = (val >> 8) & 0xFF;
@@ -399,6 +413,8 @@ static size_t compress_rle_direct(const uint16_t *pixels, int count, uint8_t *ou
             }
             if (lit == 0) lit = 1;
             
+            /* Literal: 1 + lit*2 bytes */
+            if (pos + 1 + lit * 2 > max_pos) goto overflow;
             out[pos++] = lit;
             for (int j = 0; j < lit; j++) {
                 out[pos++] = pixels[i + j] & 0xFF;
@@ -410,12 +426,18 @@ static size_t compress_rle_direct(const uint16_t *pixels, int count, uint8_t *ou
     
     out[pos++] = 0x00;
     return pos;
+    
+overflow:
+    fprintf(stderr, "Error: RLE direct buffer overflow at pixel %d\n", i);
+    return 0;  /* Signal error */
 }
 
 /* RLE XOR compression */
-static size_t compress_rle_xor(const uint16_t *curr, const uint16_t *prev, int count, uint8_t *out) {
+/* Worst case: count * 3 + 1 bytes (all nonzeros = 1 + 2 bytes each, plus terminator) */
+static size_t compress_rle_xor(const uint16_t *curr, const uint16_t *prev, int count, uint8_t *out, size_t out_size) {
     size_t pos = 0;
     int i = 0;
+    const size_t max_pos = out_size > 0 ? out_size - 1 : 0;
     
     while (i < count) {
         int zeros = 0;
@@ -425,6 +447,7 @@ static size_t compress_rle_xor(const uint16_t *curr, const uint16_t *prev, int c
         }
         
         if (zeros > 0) {
+            if (pos + 1 > max_pos) goto overflow;
             out[pos++] = 0x80 | (zeros - 1);
             i += zeros;
         }
@@ -436,6 +459,7 @@ static size_t compress_rle_xor(const uint16_t *curr, const uint16_t *prev, int c
         }
         
         if (nonzeros > 0) {
+            if (pos + 1 + nonzeros * 2 > max_pos) goto overflow;
             out[pos++] = nonzeros;
             for (int j = 0; j < nonzeros; j++) {
                 uint16_t delta = curr[i + j] ^ prev[i + j];
@@ -448,19 +472,24 @@ static size_t compress_rle_xor(const uint16_t *curr, const uint16_t *prev, int c
     
     out[pos++] = 0x00;
     return pos;
+    
+overflow:
+    fprintf(stderr, "Error: RLE XOR buffer overflow at pixel %d\n", i);
+    return 0;
 }
 
 /* Sparse XOR compression (position + value for changed pixels) */
+/* Worst case: 2 + count * 4 bytes (header + all pixels changed) */
 /* WARNING: Limited to frames <= 65535 pixels (16-bit index overflow) */
-static size_t compress_sparse_xor(const uint16_t *curr, const uint16_t *prev, int count, uint8_t *out) {
+static size_t compress_sparse_xor(const uint16_t *curr, const uint16_t *prev, int count, uint8_t *out, size_t out_size) {
     /* Validate frame size for 16-bit pixel indices */
     if (count > 65535) {
         fprintf(stderr, "Warning: Sparse XOR not suitable for frames > 65535 pixels (frame has %d)\n", count);
-        /* Return 0 to indicate this method should not be used */
         return 0;
     }
     
     size_t pos = 0;
+    const size_t max_pos = out_size;
     
     /* Count changed pixels first */
     int changed = 0;
@@ -469,6 +498,7 @@ static size_t compress_sparse_xor(const uint16_t *curr, const uint16_t *prev, in
     }
     
     /* Header: number of changed pixels (16-bit) */
+    if (pos + 2 > max_pos) goto overflow;
     out[pos++] = changed & 0xFF;
     out[pos++] = (changed >> 8) & 0xFF;
     
@@ -476,6 +506,7 @@ static size_t compress_sparse_xor(const uint16_t *curr, const uint16_t *prev, in
     for (int i = 0; i < count; i++) {
         uint16_t delta = curr[i] ^ prev[i];
         if (delta != 0) {
+            if (pos + 4 > max_pos) goto overflow;
             out[pos++] = i & 0xFF;
             out[pos++] = (i >> 8) & 0xFF;
             out[pos++] = delta & 0xFF;
@@ -484,6 +515,10 @@ static size_t compress_sparse_xor(const uint16_t *curr, const uint16_t *prev, in
     }
     
     return pos;
+    
+overflow:
+    fprintf(stderr, "Error: Sparse XOR buffer overflow\n");
+    return 0;
 }
 
 /* Raw XOR compression (no compression, just XOR values) */
@@ -725,7 +760,8 @@ static void print_help(const char *prog) {
     fprintf(stderr, "  -x <offset>    Horizontal offset (default: 0)\n");
     fprintf(stderr, "  -y <offset>    Vertical offset (default: 0)\n");
     fprintf(stderr, "  -d <delay>     Frame delay in ms (default: 33)\n");
-    fprintf(stderr, "  -l <0|1>       Loop animation: 1=loop (default), 0=stay on last frame\n");
+    fprintf(stderr, "  -l <mode>      Loop mode: 0=no loop, 1=full loop (default), 2=partial loop\n");
+    fprintf(stderr, "  -L <frame>     Loop start frame for partial loop mode (default: 0)\n");
     fprintf(stderr, "  -c <color>     Background color RRGGBB hex (default: 000000)\n");
     fprintf(stderr, "  -b <image>     Background image for modes 1,2\n");
     fprintf(stderr, "  -r <W>x<H>     Target resolution for fullscreen modes\n");
@@ -752,7 +788,10 @@ int main(int argc, char *argv[]) {
             frame_delay_ms = atoi(argv[++arg_idx]);
             arg_idx++;
         } else if (strcmp(argv[arg_idx], "-l") == 0 && arg_idx + 1 < argc) {
-            loop = atoi(argv[++arg_idx]);
+            loop_mode = atoi(argv[++arg_idx]);
+            arg_idx++;
+        } else if (strcmp(argv[arg_idx], "-L") == 0 && arg_idx + 1 < argc) {
+            loop_start = atoi(argv[++arg_idx]);
             arg_idx++;
         } else if (strcmp(argv[arg_idx], "-c") == 0 && arg_idx + 1 < argc) {
             bg_color = (uint32_t)strtol(argv[++arg_idx], NULL, 16);
@@ -790,6 +829,12 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     
+    /* Validate display_mode range */
+    if (display_mode < 0 || display_mode > 4) {
+        fprintf(stderr, "Error: Invalid display mode %d (must be 0-4)\n", display_mode);
+        return 1;
+    }
+    
     const char *mode_names[] = {
         "Animation on solid background",
         "Animation on background image (centered)",
@@ -815,7 +860,10 @@ int main(int argc, char *argv[]) {
     
     if (display_mode == MODE_ANIM_SOLID || display_mode == MODE_ANIM_IMAGE_CENTER || display_mode == MODE_ANIM_IMAGE_FULL) {
         printf("#define FRAME_DURATION_MS %d\n", frame_delay_ms);
-        printf("#define LOOP %d  /* 1=loop, 0=stay on last frame */\n", loop);
+        printf("#define LOOP_MODE %d  /* 0=no loop, 1=full loop, 2=partial loop */\n", loop_mode);
+        if (loop_mode == 2) {
+            printf("#define LOOP_START %d  /* Loop restart frame for partial loop */\n", loop_start);
+        }
     }
     
     /* Handle different modes */
@@ -823,24 +871,31 @@ int main(int argc, char *argv[]) {
         /* Single static image - convert to standard format first */
         char tmp_path[512];
         char cmd[1024];
-        char escaped_path[512];
-        char escaped_tmp[512];
         char bg_color_str[16];
         
         snprintf(bg_color_str, sizeof(bg_color_str), "#%06X", bg_color);
         snprintf(tmp_path, sizeof(tmp_path), "/tmp/splash_static_%d.png", getpid());
         
-        shell_escape(escaped_path, sizeof(escaped_path), input_path);
-        shell_escape(escaped_tmp, sizeof(escaped_tmp), tmp_path);
-        
         /* Convert to RGB, flatten alpha - handles colormap and transparent PNGs */
-        snprintf(cmd, sizeof(cmd),
-                 "convert \"%s\" -background \"%s\" -flatten -type TrueColor -depth 8 PNG24:\"%s\" 2>/dev/null",
-                 escaped_path, bg_color_str, escaped_tmp);
-        if (system(cmd) != 0) {
+        char png24_arg[32];
+        snprintf(png24_arg, sizeof(png24_arg), "PNG24:%s", tmp_path);
+        
+        char *argv[] = {
+            (char *)"convert",
+            (char *)input_path,
+            (char *)"-background",
+            bg_color_str,
+            (char *)"-flatten",
+            (char *)"-type", (char *)"TrueColor",
+            (char *)"-depth", (char *)"8",
+            png24_arg,
+            NULL
+        };
+        
+        if (exec_cmd("convert", argv) != 0) {
             /* Fallback: try without flatten */
-            snprintf(cmd, sizeof(cmd), "cp \"%s\" \"%s\"", escaped_path, escaped_tmp);
-            system(cmd);
+            char *cp_argv[] = {(char *)"cp", (char *)input_path, tmp_path, NULL};
+            exec_cmd("cp", cp_argv);
         }
         
         image_t img;
@@ -905,15 +960,41 @@ int main(int argc, char *argv[]) {
         }
         
         /* Collect frames */
-        frame_entry_t *frames = malloc(sizeof(frame_entry_t) * 256);
-        int nframes = 0;
+        /* First pass: count frames */
+        int frame_count = 0;
         struct dirent *ent;
+        while ((ent = readdir(dir)) != NULL) {
+            if (strstr(ent->d_name, ".png") || strstr(ent->d_name, ".PNG") ||
+                strstr(ent->d_name, ".jpg") || strstr(ent->d_name, ".JPG") ||
+                strstr(ent->d_name, ".jpeg") || strstr(ent->d_name, ".JPEG")) {
+                frame_count++;
+            }
+        }
+        rewinddir(dir);
+        
+        if (frame_count == 0) {
+            fprintf(stderr, "Error: No frames found\n");
+            closedir(dir);
+            return 1;
+        }
+        
+        if (frame_count > 65535) {
+            fprintf(stderr, "Error: Too many frames (%d). Maximum is 65535.\n", frame_count);
+            closedir(dir);
+            return 1;
+        }
+        
+        fprintf(stderr, "Found %d frames\n", frame_count);
+        
+        /* Allocate arrays */
+        frame_entry_t *frames = malloc(sizeof(frame_entry_t) * frame_count);
+        int nframes = 0;
         char tmpdir[256];
         snprintf(tmpdir, sizeof(tmpdir), "/tmp/splash_frames_%d", getpid());
         mkdir(tmpdir, 0755);
         
-        /* First pass: collect all frame filenames */
-        while ((ent = readdir(dir)) != NULL && nframes < 256) {
+        /* Second pass: collect frame filenames */
+        while ((ent = readdir(dir)) != NULL && nframes < frame_count) {
             if (strstr(ent->d_name, ".png") || strstr(ent->d_name, ".PNG") ||
                 strstr(ent->d_name, ".jpg") || strstr(ent->d_name, ".JPG") ||
                 strstr(ent->d_name, ".jpeg") || strstr(ent->d_name, ".JPEG")) {
@@ -923,21 +1004,9 @@ int main(int argc, char *argv[]) {
                 snprintf(frames[nframes].tmp_path, 512, "%s/%s", tmpdir, ent->d_name);
                 frames[nframes].index = -1;  /* Will be set after sorting */
                 nframes++;
-                if (nframes >= 256) {
-                    fprintf(stderr, "Warning: Frame limit reached (256 max). Additional frames will be ignored.\n");
-                }
             }
         }
         closedir(dir);
-        
-        if (nframes == 0) {
-            fprintf(stderr, "Error: No frames found\n");
-            return 1;
-        }
-        
-        if (nframes >= 256) {
-            fprintf(stderr, "Warning: Animation truncated to 256 frames. Consider splitting into multiple sequences.\n");
-        }
         
         /* Sort by filename first to ensure consistent reference frame */
         qsort(frames, nframes, sizeof(frame_entry_t), compare_frames);
@@ -968,20 +1037,27 @@ int main(int argc, char *argv[]) {
         
         /* Convert frames to standard format */
         for (int i = 0; i < nframes; i++) {
-            char cmd[1024];
-            char escaped_path[512];
-            char escaped_tmp[512];
             char bg_color_str[16];
             snprintf(bg_color_str, sizeof(bg_color_str), "#%06X", bg_color);
-            shell_escape(escaped_path, sizeof(escaped_path), frames[i].path);
-            shell_escape(escaped_tmp, sizeof(escaped_tmp), frames[i].tmp_path);
-            snprintf(cmd, sizeof(cmd), 
-                     "convert \"%s\" -background \"%s\" -flatten -type TrueColor -depth 8 PNG24:\"%s\" 2>/dev/null",
-                     escaped_path, bg_color_str, escaped_tmp);
-            if (system(cmd) != 0) {
-                snprintf(cmd, sizeof(cmd), "cp \"%s\" \"%s\"",
-                         escaped_path, escaped_tmp);
-                system(cmd);
+            
+            char png24_arg[32];
+            snprintf(png24_arg, sizeof(png24_arg), "PNG24:%s", frames[i].tmp_path);
+            
+            char *argv[] = {
+                (char *)"convert",
+                frames[i].path,
+                (char *)"-background",
+                bg_color_str,
+                (char *)"-flatten",
+                (char *)"-type", (char *)"TrueColor",
+                (char *)"-depth", (char *)"8",
+                png24_arg,
+                NULL
+            };
+            
+            if (exec_cmd("convert", argv) != 0) {
+                char *cp_argv[] = {(char *)"cp", frames[i].path, frames[i].tmp_path, NULL};
+                exec_cmd("cp", cp_argv);
             }
         }
         
@@ -1020,18 +1096,19 @@ int main(int argc, char *argv[]) {
             for (int m = 0; m < 3; m++) {
                 size_t total = frame0_size;
                 int method_valid = 1;  /* Track if method is valid for this animation */
+                const size_t test_buf_size = (size_t)pixels * 6;
                 
                 for (int f = 1; f < nframes; f++) {
                     size_t size = 0;  /* Initialize to prevent undefined behavior */
                     switch (method_ids[m]) {
                         case COMPRESS_RLE_XOR:
-                            size = compress_rle_xor(frame_imgs[f].pixels, frame_imgs[f-1].pixels, pixels, test_buf);
+                            size = compress_rle_xor(frame_imgs[f].pixels, frame_imgs[f-1].pixels, pixels, test_buf, test_buf_size);
                             break;
                         case COMPRESS_SPARSE:
-                            size = compress_sparse_xor(frame_imgs[f].pixels, frame_imgs[f-1].pixels, pixels, test_buf);
+                            size = compress_sparse_xor(frame_imgs[f].pixels, frame_imgs[f-1].pixels, pixels, test_buf, test_buf_size);
                             break;
                         case COMPRESS_RLE_DIRECT:
-                            size = compress_rle_direct(frame_imgs[f].pixels, pixels, test_buf);
+                            size = compress_rle_direct(frame_imgs[f].pixels, pixels, test_buf, test_buf_size);
                             break;
                         default:
                             size = 0;  /* Should never happen */
@@ -1077,8 +1154,8 @@ int main(int argc, char *argv[]) {
         }
         
         /* Compress frames with selected method */
-        uint8_t *compressed[256];
-        size_t comp_sizes[256];
+        uint8_t **compressed = malloc(sizeof(uint8_t*) * nframes);
+        size_t *comp_sizes = malloc(sizeof(size_t) * nframes);
         size_t total_size = 0;
         
         /* Frame 0: always raw RGB565 (no previous frame for XOR) */
@@ -1090,25 +1167,26 @@ int main(int argc, char *argv[]) {
         
         /* Delta frames */
         for (int f = 1; f < nframes; f++) {
-            compressed[f] = malloc(pixels * 6);
+            const size_t comp_buf_size = (size_t)pixels * 6;
+            compressed[f] = malloc(comp_buf_size);
             switch (compress_method) {
                 case COMPRESS_RLE_XOR:
                     comp_sizes[f] = compress_rle_xor(frame_imgs[f].pixels,
-                                                     frame_imgs[f-1].pixels, pixels, compressed[f]);
+                                                     frame_imgs[f-1].pixels, pixels, compressed[f], comp_buf_size);
                     break;
                 case COMPRESS_RLE_DIRECT:
-                    comp_sizes[f] = compress_rle_direct(frame_imgs[f].pixels, pixels, compressed[f]);
+                    comp_sizes[f] = compress_rle_direct(frame_imgs[f].pixels, pixels, compressed[f], comp_buf_size);
                     break;
                 case COMPRESS_SPARSE:
                     comp_sizes[f] = compress_sparse_xor(frame_imgs[f].pixels,
-                                                        frame_imgs[f-1].pixels, pixels, compressed[f]);
+                                                        frame_imgs[f-1].pixels, pixels, compressed[f], comp_buf_size);
                     break;
                 case COMPRESS_RAW:
                     comp_sizes[f] = compress_raw_direct(frame_imgs[f].pixels, pixels, compressed[f]);
                     break;
                 default:
                     comp_sizes[f] = compress_rle_xor(frame_imgs[f].pixels,
-                                                     frame_imgs[f-1].pixels, pixels, compressed[f]);
+                                                     frame_imgs[f-1].pixels, pixels, compressed[f], comp_buf_size);
             }
             total_size += comp_sizes[f];
             output_frame_data(f, compressed[f], comp_sizes[f]);
@@ -1138,12 +1216,12 @@ int main(int argc, char *argv[]) {
         }
         free(frame_imgs);
         free(frames);
+        free(compressed);
+        free(comp_sizes);
         
-        char cleanup[512];
-        char escaped_tmpdir[256];
-        shell_escape(escaped_tmpdir, sizeof(escaped_tmpdir), tmpdir);
-        snprintf(cleanup, sizeof(cleanup), "rm -rf %s", escaped_tmpdir);
-        system(cleanup);
+        /* Cleanup temp directory */
+        char *rm_argv[] = {(char *)"rm", (char *)"-rf", tmpdir, NULL};
+        exec_cmd("rm", rm_argv);
         
     } else if (display_mode == MODE_ANIM_IMAGE_CENTER || display_mode == MODE_ANIM_IMAGE_FULL) {
         /* Animation on background image */
@@ -1154,19 +1232,21 @@ int main(int argc, char *argv[]) {
         
         /* Convert background to standard PNG first to handle JPEG and other formats */
         char bg_tmp_path[512];
-        char bg_cmd[1024];
-        char escaped_bg_path[512];
-        char escaped_bg_tmp[512];
-        
         snprintf(bg_tmp_path, sizeof(bg_tmp_path), "/tmp/splash_bg_%d.png", getpid());
-        shell_escape(escaped_bg_path, sizeof(escaped_bg_path), bg_image_path);
-        shell_escape(escaped_bg_tmp, sizeof(escaped_bg_tmp), bg_tmp_path);
         
-        snprintf(bg_cmd, sizeof(bg_cmd),
-                 "convert \"%s\" -type TrueColor -depth 8 PNG24:\"%s\" 2>/dev/null",
-                 escaped_bg_path, escaped_bg_tmp);
+        char png24_arg[32];
+        snprintf(png24_arg, sizeof(png24_arg), "PNG24:%s", bg_tmp_path);
         
-        if (system(bg_cmd) != 0) {
+        char *bg_argv[] = {
+            (char *)"convert",
+            (char *)bg_image_path,
+            (char *)"-type", (char *)"TrueColor",
+            (char *)"-depth", (char *)"8",
+            png24_arg,
+            NULL
+        };
+        
+        if (exec_cmd("convert", bg_argv) != 0) {
             fprintf(stderr, "Error: Failed to convert background image: %s\n", bg_image_path);
             return 1;
         }
@@ -1198,15 +1278,43 @@ int main(int argc, char *argv[]) {
             return 1;
         }
         
-        frame_entry_t *frames = malloc(sizeof(frame_entry_t) * 256);
+        frame_entry_t *frames = NULL;
         int nframes = 0;
         struct dirent *ent;
         char tmpdir[256];
         snprintf(tmpdir, sizeof(tmpdir), "/tmp/splash_frames_%d", getpid());
         mkdir(tmpdir, 0755);
         
-        /* First pass: collect all frame filenames */
-        while ((ent = readdir(dir)) != NULL && nframes < 256) {
+        /* First pass: count frames */
+        int frame_count = 0;
+        while ((ent = readdir(dir)) != NULL) {
+            if (strstr(ent->d_name, ".png") || strstr(ent->d_name, ".PNG") ||
+                strstr(ent->d_name, ".jpg") || strstr(ent->d_name, ".JPG") ||
+                strstr(ent->d_name, ".jpeg") || strstr(ent->d_name, ".JPEG")) {
+                frame_count++;
+            }
+        }
+        rewinddir(dir);
+        
+        if (frame_count == 0) {
+            fprintf(stderr, "Error: No frames found\n");
+            closedir(dir);
+            return 1;
+        }
+        
+        if (frame_count > 65535) {
+            fprintf(stderr, "Error: Too many frames (%d). Maximum is 65535.\n", frame_count);
+            closedir(dir);
+            return 1;
+        }
+        
+        fprintf(stderr, "Found %d frames\n", frame_count);
+        
+        /* Allocate arrays */
+        frames = malloc(sizeof(frame_entry_t) * frame_count);
+        
+        /* Second pass: collect frame filenames */
+        while ((ent = readdir(dir)) != NULL && nframes < frame_count) {
             if (strstr(ent->d_name, ".png") || strstr(ent->d_name, ".PNG") ||
                 strstr(ent->d_name, ".jpg") || strstr(ent->d_name, ".JPG") ||
                 strstr(ent->d_name, ".jpeg") || strstr(ent->d_name, ".JPEG")) {
@@ -1216,9 +1324,6 @@ int main(int argc, char *argv[]) {
                 snprintf(frames[nframes].tmp_path, 512, "%s/%s", tmpdir, ent->d_name);
                 frames[nframes].index = -1;  /* Will be set after sorting */
                 nframes++;
-                if (nframes >= 256) {
-                    fprintf(stderr, "Warning: Frame limit reached (256 max). Additional frames will be ignored.\n");
-                }
             }
         }
         closedir(dir);
@@ -1255,20 +1360,27 @@ int main(int argc, char *argv[]) {
         
         /* Convert frames to standard format */
         for (int i = 0; i < nframes; i++) {
-            char cmd[1024];
-            char escaped_path[512];
-            char escaped_tmp[512];
             char bg_color_str[16];
             snprintf(bg_color_str, sizeof(bg_color_str), "#%06X", bg_color);
-            shell_escape(escaped_path, sizeof(escaped_path), frames[i].path);
-            shell_escape(escaped_tmp, sizeof(escaped_tmp), frames[i].tmp_path);
-            snprintf(cmd, sizeof(cmd),
-                     "convert \"%s\" -background \"%s\" -flatten -type TrueColor -depth 8 PNG24:\"%s\" 2>/dev/null",
-                     escaped_path, bg_color_str, escaped_tmp);
-            if (system(cmd) != 0) {
-                snprintf(cmd, sizeof(cmd), "cp \"%s\" \"%s\"",
-                         escaped_path, escaped_tmp);
-                system(cmd);
+            
+            char png24_arg[32];
+            snprintf(png24_arg, sizeof(png24_arg), "PNG24:%s", frames[i].tmp_path);
+            
+            char *argv[] = {
+                (char *)"convert",
+                frames[i].path,
+                (char *)"-background",
+                bg_color_str,
+                (char *)"-flatten",
+                (char *)"-type", (char *)"TrueColor",
+                (char *)"-depth", (char *)"8",
+                png24_arg,
+                NULL
+            };
+            
+            if (exec_cmd("convert", argv) != 0) {
+                char *cp_argv[] = {(char *)"cp", frames[i].path, frames[i].tmp_path, NULL};
+                exec_cmd("cp", cp_argv);
             }
         }
         
@@ -1336,18 +1448,19 @@ int main(int argc, char *argv[]) {
             for (int m = 0; m < 3; m++) {
                 size_t total = frame0_size;
                 int method_valid = 1;  /* Track if method is valid for this animation */
+                const size_t test_buf_size = (size_t)pixels * 6;
                 
                 for (int f = 1; f < nframes; f++) {
                     size_t size = 0;  /* Initialize to prevent undefined behavior */
                     switch (method_ids[m]) {
                         case COMPRESS_RLE_XOR:
-                            size = compress_rle_xor(frame_imgs[f].pixels, frame_imgs[f-1].pixels, pixels, test_buf);
+                            size = compress_rle_xor(frame_imgs[f].pixels, frame_imgs[f-1].pixels, pixels, test_buf, test_buf_size);
                             break;
                         case COMPRESS_SPARSE:
-                            size = compress_sparse_xor(frame_imgs[f].pixels, frame_imgs[f-1].pixels, pixels, test_buf);
+                            size = compress_sparse_xor(frame_imgs[f].pixels, frame_imgs[f-1].pixels, pixels, test_buf, test_buf_size);
                             break;
                         case COMPRESS_RLE_DIRECT:
-                            size = compress_rle_direct(frame_imgs[f].pixels, pixels, test_buf);
+                            size = compress_rle_direct(frame_imgs[f].pixels, pixels, test_buf, test_buf_size);
                             break;
                         default:
                             size = 0;  /* Should never happen */
@@ -1393,8 +1506,8 @@ int main(int argc, char *argv[]) {
         }
         
         /* Compress frames with selected method */
-        uint8_t *compressed[256];
-        size_t comp_sizes[256];
+        uint8_t **compressed = malloc(sizeof(uint8_t*) * nframes);
+        size_t *comp_sizes = malloc(sizeof(size_t) * nframes);
         size_t total_size = 0;
         
         /* Frame 0: always raw RGB565 (no previous frame for XOR) */
@@ -1404,25 +1517,26 @@ int main(int argc, char *argv[]) {
         output_frame_data(0, compressed[0], comp_sizes[0]);
         
         for (int f = 1; f < nframes; f++) {
-            compressed[f] = malloc(pixels * 6);
+            const size_t comp_buf_size = (size_t)pixels * 6;
+            compressed[f] = malloc(comp_buf_size);
             switch (compress_method) {
                 case COMPRESS_RLE_XOR:
                     comp_sizes[f] = compress_rle_xor(frame_imgs[f].pixels,
-                                                     frame_imgs[f-1].pixels, pixels, compressed[f]);
+                                                     frame_imgs[f-1].pixels, pixels, compressed[f], comp_buf_size);
                     break;
                 case COMPRESS_RLE_DIRECT:
-                    comp_sizes[f] = compress_rle_direct(frame_imgs[f].pixels, pixels, compressed[f]);
+                    comp_sizes[f] = compress_rle_direct(frame_imgs[f].pixels, pixels, compressed[f], comp_buf_size);
                     break;
                 case COMPRESS_SPARSE:
                     comp_sizes[f] = compress_sparse_xor(frame_imgs[f].pixels,
-                                                        frame_imgs[f-1].pixels, pixels, compressed[f]);
+                                                        frame_imgs[f-1].pixels, pixels, compressed[f], comp_buf_size);
                     break;
                 case COMPRESS_RAW:
                     comp_sizes[f] = compress_raw_direct(frame_imgs[f].pixels, pixels, compressed[f]);
                     break;
                 default:
                     comp_sizes[f] = compress_rle_xor(frame_imgs[f].pixels,
-                                                     frame_imgs[f-1].pixels, pixels, compressed[f]);
+                                                     frame_imgs[f-1].pixels, pixels, compressed[f], comp_buf_size);
             }
             total_size += comp_sizes[f];
             output_frame_data(f, compressed[f], comp_sizes[f]);
@@ -1451,12 +1565,12 @@ int main(int argc, char *argv[]) {
         }
         free(frame_imgs);
         free(frames);
+        free(compressed);
+        free(comp_sizes);
         
-        char cleanup[512];
-        char escaped_tmpdir[256];
-        shell_escape(escaped_tmpdir, sizeof(escaped_tmpdir), tmpdir);
-        snprintf(cleanup, sizeof(cleanup), "rm -rf %s", escaped_tmpdir);
-        system(cleanup);
+        /* Cleanup temp directory */
+        char *rm_argv[] = {(char *)"rm", (char *)"-rf", tmpdir, NULL};
+        exec_cmd("rm", rm_argv);
     }
     
     return 0;
