@@ -417,7 +417,12 @@ static int drm_init(xbs_drm_ctx_t *ctx) {
     int fd = -1;
     int found_card_idx = -1;
     
-    /* Scan all DRI cards (handles multi-GPU, eGPU systems) */
+    /* Scan all DRI cards (handles multi-GPU, eGPU systems)
+     * CRITICAL: Must check for CONNECTED connector, not just dumb buffer capability!
+     * On hybrid laptops (Optimus: iGPU + dGPU), both cards may have dumb buffers,
+     * but only the iGPU has the physical display connected. Selecting the dGPU
+     * would result in splash displayed to nowhere (black screen for user).
+     */
     for (int card_idx = 0; card_idx < 16; card_idx++) {
         char card_path[32];
         snprintf(card_path, sizeof(card_path), "/dev/dri/card%d", card_idx);
@@ -425,17 +430,48 @@ static int drm_init(xbs_drm_ctx_t *ctx) {
         fd = open(card_path, O_RDWR | O_CLOEXEC);
         if (fd < 0) continue;
         
+        /* Check for dumb buffer capability */
         uint64_t has_dumb;
-        if (drmGetCap(fd, DRM_CAP_DUMB_BUFFER, &has_dumb) >= 0 && has_dumb) {
-            found_card_idx = card_idx;  /* Remember which card we're using */
-            break;  /* Found usable device */
+        if (drmGetCap(fd, DRM_CAP_DUMB_BUFFER, &has_dumb) < 0 || !has_dumb) {
+            close(fd);
+            fd = -1;
+            continue;
         }
+        
+        /* Check for CONNECTED connector - this is the critical fix for multi-GPU */
+        drmModeRes *res = drmModeGetResources(fd);
+        if (!res) {
+            close(fd);
+            fd = -1;
+            continue;
+        }
+        
+        /* Scan connectors for a connected one */
+        int has_connected = 0;
+        for (int i = 0; i < res->count_connectors; i++) {
+            drmModeConnector *conn = drmModeGetConnector(fd, res->connectors[i]);
+            if (conn && conn->connection == DRM_MODE_CONNECTED) {
+                has_connected = 1;
+                drmModeFreeConnector(conn);
+                break;
+            }
+            if (conn) drmModeFreeConnector(conn);
+        }
+        
+        drmModeFreeResources(res);
+        
+        if (has_connected) {
+            found_card_idx = card_idx;  /* Remember which card we're using */
+            break;  /* Found usable device with connected display */
+        }
+        
+        /* No connected display on this card - try next */
         close(fd);
         fd = -1;
     }
     
     if (fd < 0) {
-        write(2, "DRM: No device\n", 15);
+        write(2, "DRM: No device with connected display\n", 38);
         return -ENODEV;
     }
     
@@ -505,6 +541,18 @@ static int drm_init(xbs_drm_ctx_t *ctx) {
 
 static void drm_cleanup(xbs_drm_ctx_t *ctx) {
     if (!ctx || ctx->fd < 0) return;
+    
+    /* Mark framebuffer as dirty for virtual GPUs (VMware/QXL) before cleanup */
+    /* This ensures the virtual GPU releases all resources before handoff to tty1 */
+    if (ctx->fb_id) {
+        struct drm_mode_rect clip = {
+            .x1 = 0,
+            .y1 = 0,
+            .x2 = ctx->width,
+            .y2 = ctx->height
+        };
+        drmModeDirtyFB(ctx->fd, ctx->fb_id, &clip, 1);
+    }
     
     /* Restore previous CRTC state */
     if (ctx->saved_crtc) {
@@ -608,14 +656,16 @@ static int restore_crtc_from_file(void) {
 #include <emmintrin.h>
 
 /* SSE2 optimized RGB565 to XRGB8888 conversion - processes 8 pixels at once
- * Critical for VRAM: uses _mm_stream_si128 (non-temporal stores) for optimal PCIe bandwidth
- * Non-temporal stores bypass cache - ideal for Write-Combining VRAM memory
- * WC memory requires contiguous 64-byte blocks for best performance */
+ * Uses non-temporal stores when aligned for optimal PCIe bandwidth to VRAM
+ * Non-temporal stores bypass cache - ideal for Write-Combining VRAM memory */
 static void blit_rgb565_to_xrgb8888_sse2(uint32_t *dst, const uint16_t *src, int count) {
     /* Hoist mask constants outside loop */
     const __m128i r_mask = _mm_set1_epi32(0x0000F800);  /* bits 11-15 */
     const __m128i g_mask = _mm_set1_epi32(0x000007E0);  /* bits 5-10 */
     const __m128i b_mask = _mm_set1_epi32(0x0000001F);  /* bits 0-4 */
+    
+    /* Check if destination is 16-byte aligned for streaming stores */
+    int use_streaming = (((uintptr_t)dst & 0xF) == 0);
     
     int i = 0;
     
@@ -654,13 +704,18 @@ static void blit_rgb565_to_xrgb8888_sse2(uint32_t *dst, const uint16_t *src, int
         __m128i result_lo = _mm_or_si128(_mm_or_si128(r_lo, g_lo), b_lo);
         __m128i result_hi = _mm_or_si128(_mm_or_si128(r_hi, g_hi), b_hi);
         
-        /* Non-temporal stores for VRAM - bypass cache for WC memory efficiency */
-        _mm_stream_si128((__m128i *)(dst + i), result_lo);
-        _mm_stream_si128((__m128i *)(dst + i + 4), result_hi);
+        /* Use streaming stores for aligned VRAM writes (2x bandwidth), unaligned for safety */
+        if (use_streaming) {
+            _mm_stream_si128((__m128i *)(dst + i), result_lo);
+            _mm_stream_si128((__m128i *)(dst + i + 4), result_hi);
+        } else {
+            _mm_storeu_si128((__m128i *)(dst + i), result_lo);
+            _mm_storeu_si128((__m128i *)(dst + i + 4), result_hi);
+        }
     }
     
-    /* SFENCE to ensure all non-temporal stores are complete */
-    _mm_sfence();
+    /* SFENCE required after streaming stores to ensure completion */
+    if (use_streaming) _mm_sfence();
     
     /* Handle remaining pixels with scalar code */
     for (; i < count; i++) {
@@ -813,17 +868,32 @@ int main(int argc, char **argv) {
     
     /* Allocate frame buffer */
     frame_buffer = mmap(NULL, FRAME_W * FRAME_H * 2, PROT_READ | PROT_WRITE,
-                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                        MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE, -1, 0);
     if (frame_buffer == MAP_FAILED) {
         write(2, "DRM: No memory\n", 14);
         drm_cleanup(&drm_ctx);
         return 1;
     }
     
+    /* Load initial frame */
+#if DISPLAY_MODE == 3 || DISPLAY_MODE == 4
+    /* Static image - decompress or copy to frame_buffer */
+#if defined(COMPRESS_METHOD) && COMPRESS_METHOD == 5
+    /* Palette + LZSS compressed */
+    decompress_palette_lzss(img_compressed, IMG_COMPRESSED_SIZE, palette, PALETTE_SIZE,
+                            frame_buffer, FRAME_W * FRAME_H);
+#else
+    /* Raw RGB565 */
+    for (int i = 0; i < FRAME_W * FRAME_H; i++) {
+        frame_buffer[i] = frame_0[i];
+    }
+#endif
+#endif
+    
 #if DISPLAY_MODE == 1 || DISPLAY_MODE == 2
     /* Allocate and decompress background */
     bg_buffer = mmap(NULL, BG_W * BG_H * 2, PROT_READ | PROT_WRITE,
-                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE, -1, 0);
     if (bg_buffer == MAP_FAILED) {
         munmap(frame_buffer, FRAME_W * FRAME_H * 2);
         drm_cleanup(&drm_ctx);

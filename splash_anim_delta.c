@@ -27,7 +27,46 @@
  */
 
 #include "nolibc.h"
-#include <emmintrin.h>  /* SSE2 intrinsics for x86_64 */
+
+/* SSE2 intrinsics - inline asm implementation without system headers */
+typedef long long __m128i __attribute__((__vector_size__(16), __aligned__(16)));
+typedef long long __m128i_u __attribute__((__vector_size__(16), __may_alias__, __aligned__(1)));
+
+#define _mm_set1_epi32(v)   __extension__({ \
+    int _v = (v); \
+    __m128i _r; \
+    __asm__("movd %1, %0; pshufd $0, %0, %0" : "=x"(_r) : "r"(_v)); \
+    _r; \
+})
+#define _mm_set1_epi16(v)   __extension__({ \
+    short _v = (short)(v); \
+    __m128i _r; \
+    __asm__("movd %1, %0; pshuflw $0, %0, %0; pshufhw $0, %0, %0" : "=x"(_r) : "r"(_v)); \
+    _r; \
+})
+#define _mm_setzero_si128() __extension__({ __m128i _r; __asm__("pxor %0, %0" : "=x"(_r)); _r; })
+#define _mm_loadu_si128(p)  (*(__m128i_u*)(p))
+#define _mm_storeu_si128(p, v) __extension__({ *(__m128i_u*)(p) = (v); })
+#define _mm_stream_si128(p, v) __asm__("movntdq %1, %0" : "=m"(*(__m128i*)(p)) : "x"(v) : "memory")
+#define _mm_sfence() __asm__ __volatile__("sfence" ::: "memory")
+#define _mm_unpacklo_epi16(a, b) __extension__({ \
+    __m128i _r; __asm__("punpcklwd %2, %1; movdqa %1, %0" : "=x"(_r) : "x"(a), "x"(b)); _r; \
+})
+#define _mm_unpackhi_epi16(a, b) __extension__({ \
+    __m128i _r; __asm__("punpckhwd %2, %1; movdqa %1, %0" : "=x"(_r) : "x"(a), "x"(b)); _r; \
+})
+#define _mm_and_si128(a, b) __extension__({ \
+    __m128i _r; __asm__("pand %2, %1; movdqa %1, %0" : "=x"(_r) : "x"(a), "x"(b)); _r; \
+})
+#define _mm_or_si128(a, b) __extension__({ \
+    __m128i _r; __asm__("por %2, %1; movdqa %1, %0" : "=x"(_r) : "x"(a), "x"(b)); _r; \
+})
+#define _mm_slli_epi32(a, imm) __extension__({ \
+    __m128i _r; __asm__("pslld %2, %1; movdqa %1, %0" : "=x"(_r) : "x"(a), "i"(imm)); _r; \
+})
+#define _mm_srli_epi32(a, imm) __extension__({ \
+    __m128i _r; __asm__("psrld %2, %1; movdqa %1, %0" : "=x"(_r) : "x"(a), "i"(imm)); _r; \
+})
 
 /* Types for freestanding build */
 typedef unsigned int __u32;
@@ -44,14 +83,8 @@ static unsigned int fb_yres = 0;        /* Visible height */
 static unsigned int fb_line_len = 0;    /* Line length in bytes */
 static struct fb_var_screeninfo fb_vinfo; /* For pan display */
 
-/* Blit function pointer - set at runtime based on double buffer availability */
-typedef void (*blit_func_t)(uint8_t *fbmem, int fb_w, int fb_h, int line_len, int bpp,
-                           const uint16_t *frame, int fw, int fh, int x, int y,
-                           int r_off, int g_off, int b_off);
-static blit_func_t blit_func = NULL;
-
-/* Volatile flag for signal handling */
-static volatile int terminate_requested = 0;
+/* Volatile flag for signal handling - POSIX requires sig_atomic_t for async-signal-safe access */
+static volatile sig_atomic_t terminate_requested = 0;
 
 /* Signal handler for graceful termination */
 static void signal_handler(int sig) {
@@ -77,7 +110,7 @@ static void decompress_palette_lzss(const uint8_t *compressed, size_t comp_size,
     size_t in_pos = 0;
     
     /* Initialize window */
-    for (int i = 0; i < LZSS_WINDOW_SIZE; i++) window[i] = 0;
+    memset(window, 0, LZSS_WINDOW_SIZE);
     
     while (in_pos < comp_size && out_pos < pixel_count) {
         uint8_t flag = compressed[in_pos++];
@@ -121,23 +154,24 @@ static void decompress_palette_lzss(const uint8_t *compressed, size_t comp_size,
 /* Decode RLE XOR delta and apply to frame_buffer */
 static void apply_delta_rle_xor(const uint8_t *delta, size_t delta_size) {
     size_t pos = 0;
-    int pixel_idx = 0;
-    int max_pixels = FRAME_W * FRAME_H;
+    size_t pixel_idx = 0;
+    size_t max_pixels = (size_t)FRAME_W * (size_t)FRAME_H;
     
     while (pos < delta_size) {
         uint8_t cmd = delta[pos++];
         
-        if (cmd == 0x00) {
+        if (cmd == 0) {
+            /* End marker */
             break;
         } else if (cmd & 0x80) {
             /* Skip: advance pixel index */
-            int skip = (cmd & 0x7F) + 1;
+            size_t skip = (cmd & 0x7F) + 1;
             pixel_idx += skip;
             /* Clamp to max to prevent overflow in next iteration */
             if (pixel_idx > max_pixels) pixel_idx = max_pixels;
         } else {
-            int count = cmd;
-            for (int i = 0; i < count && pixel_idx < max_pixels; i++) {
+            size_t count = cmd;
+            for (size_t i = 0; i < count && pixel_idx < max_pixels; i++) {
                 /* Bounds check before reading 2 bytes */
                 if (pos + 1 >= delta_size) break;
                 uint16_t xor_val = delta[pos] | (delta[pos + 1] << 8);
@@ -151,26 +185,27 @@ static void apply_delta_rle_xor(const uint8_t *delta, size_t delta_size) {
 /* Decode RLE Direct (no XOR, direct pixel values) */
 static void apply_delta_rle_direct(const uint8_t *delta, size_t delta_size) {
     size_t pos = 0;
-    int pixel_idx = 0;
-    int max_pixels = FRAME_W * FRAME_H;
+    size_t pixel_idx = 0;
+    size_t max_pixels = (size_t)FRAME_W * (size_t)FRAME_H;
     
     while (pos < delta_size) {
         uint8_t cmd = delta[pos++];
         
-        if (cmd == 0x00) {
+        if (cmd == 0) {
+            /* End marker */
             break;
         } else if (cmd & 0x80) {
-            int count = cmd & 0x7F;
-            /* Bounds check before reading 2 bytes */
+            /* Repeat: next 2 bytes repeated N times */
+            size_t count = (cmd & 0x7F) + 1;
             if (pos + 1 >= delta_size) break;
             uint16_t val = delta[pos] | (delta[pos + 1] << 8);
             pos += 2;
-            for (int i = 0; i < count && pixel_idx < max_pixels; i++) {
+            for (size_t i = 0; i < count && pixel_idx < max_pixels; i++) {
                 frame_buffer[pixel_idx++] = val;
             }
         } else {
-            int count = cmd;
-            for (int i = 0; i < count && pixel_idx < max_pixels; i++) {
+            size_t count = cmd;
+            for (size_t i = 0; i < count && pixel_idx < max_pixels; i++) {
                 /* Bounds check before reading 2 bytes */
                 if (pos + 1 >= delta_size) break;
                 frame_buffer[pixel_idx++] = delta[pos] | (delta[pos + 1] << 8);
@@ -181,19 +216,24 @@ static void apply_delta_rle_direct(const uint8_t *delta, size_t delta_size) {
 }
 
 /* Decode Sparse XOR delta (position + value for changed pixels) */
+/* Format: 4-byte header (changed count, 32-bit) + N * (4-byte position + 2-byte XOR) */
 static void apply_delta_sparse_xor(const uint8_t *delta, size_t delta_size) {
-    if (delta_size < 2) return;
+    if (delta_size < 4) return;
     
     size_t pos = 0;
-    int changed = delta[pos] | (delta[pos + 1] << 8);
-    pos += 2;
+    size_t changed = delta[pos] | (delta[pos + 1] << 8) | 
+	                 ((size_t)delta[pos + 2] << 16) | ((size_t)delta[pos + 3] << 24);
+    pos += 4;
     
-    for (int i = 0; i < changed && pos + 3 < delta_size; i++) {
-        int idx = delta[pos] | (delta[pos + 1] << 8);
-        uint16_t xor_val = delta[pos + 2] | (delta[pos + 3] << 8);
-        pos += 4;
+    size_t max_pixels = (size_t)FRAME_W * (size_t)FRAME_H;
+    
+    for (size_t i = 0; i < changed && pos + 5 < delta_size; i++) {
+        size_t idx = delta[pos] | (delta[pos + 1] << 8) | 
+		             ((size_t)delta[pos + 2] << 16) | ((size_t)delta[pos + 3] << 24);
+        uint16_t xor_val = delta[pos + 4] | (delta[pos + 5] << 8);
+        pos += 6;
         
-        if (idx < FRAME_W * FRAME_H) {
+        if (idx < max_pixels) {
             frame_buffer[idx] ^= xor_val;
         }
     }
@@ -201,10 +241,11 @@ static void apply_delta_sparse_xor(const uint8_t *delta, size_t delta_size) {
 
 /* Decode Raw RGB565 (direct pixel values, no compression) */
 static void apply_delta_raw(const uint8_t *raw, size_t size) {
-    int pixels = size / 2;
-    if (pixels > FRAME_W * FRAME_H) pixels = FRAME_W * FRAME_H;
+    size_t pixels = size / 2;
+    size_t max_pixels = (size_t)FRAME_W * (size_t)FRAME_H;
+    if (pixels > max_pixels) pixels = max_pixels;
     
-    for (int i = 0; i < pixels; i++) {
+    for (size_t i = 0; i < pixels; i++) {
         frame_buffer[i] = raw[i * 2] | (raw[i * 2 + 1] << 8);
     }
 }
@@ -355,11 +396,15 @@ static void fill_rect(uint8_t *fbmem, int fb_w, int fb_h, int line_len, int bpp,
 
 /* SSE2 optimized RGB565 to XRGB8888 conversion (standard layout: R=16, G=8, B=0) */
 /* Processes 8 pixels at once. Requires SSE2 capable CPU (all x86_64 have it). */
+/* Uses non-temporal stores when aligned for optimal VRAM bandwidth */
 static void blit_to_fb_32bpp_sse2(uint32_t *dst, const uint16_t *src, int count) {
     /* Pre-compute masks outside loop - guaranteed not to be recomputed each iteration */
     const __m128i r_mask = _mm_set1_epi32(0x0000F800);  /* bits 11-15 */
     const __m128i g_mask = _mm_set1_epi32(0x000007E0);  /* bits 5-10 */
     const __m128i b_mask = _mm_set1_epi32(0x0000001F);  /* bits 0-4 */
+    
+    /* Check if destination is 16-byte aligned for streaming stores */
+    int use_streaming = (((unsigned long)dst & 0xF) == 0);
     
     int i = 0;
     
@@ -399,9 +444,18 @@ static void blit_to_fb_32bpp_sse2(uint32_t *dst, const uint16_t *src, int count)
         __m128i result_hi = _mm_or_si128(_mm_or_si128(r_hi, g_hi), b_hi);
         
         /* Store 8 XRGB8888 pixels (32 bytes) */
-        _mm_storeu_si128((__m128i*)(dst + i), result_lo);
-        _mm_storeu_si128((__m128i*)(dst + i + 4), result_hi);
+        /* Use streaming stores for aligned VRAM writes (2x bandwidth), unaligned for safety */
+        if (use_streaming) {
+            _mm_stream_si128((__m128i*)(dst + i), result_lo);
+            _mm_stream_si128((__m128i*)(dst + i + 4), result_hi);
+        } else {
+            _mm_storeu_si128((__m128i*)(dst + i), result_lo);
+            _mm_storeu_si128((__m128i*)(dst + i + 4), result_hi);
+        }
     }
+    
+    /* SFENCE required after streaming stores to ensure completion */
+    if (use_streaming) _mm_sfence();
     
     /* Handle remaining pixels with scalar code */
     for (; i < count; i++) {
@@ -414,11 +468,15 @@ static void blit_to_fb_32bpp_sse2(uint32_t *dst, const uint16_t *src, int count)
 }
 
 /* SSE2 optimized RGB565 to BGRX8888 conversion (BGR layout: R=0, G=8, B=16) */
+/* Uses non-temporal stores when aligned for optimal VRAM bandwidth */
 static void blit_to_fb_32bpp_sse2_bgr(uint32_t *dst, const uint16_t *src, int count) {
     /* Hoist mask constants outside loop */
     const __m128i r_mask = _mm_set1_epi32(0x0000F800);  /* bits 11-15 */
     const __m128i g_mask = _mm_set1_epi32(0x000007E0);  /* bits 5-10 */
     const __m128i b_mask = _mm_set1_epi32(0x0000001F);  /* bits 0-4 */
+    
+    /* Check if destination is 16-byte aligned for streaming stores */
+    int use_streaming = (((unsigned long)dst & 0xF) == 0);
     
     int i = 0;
     
@@ -450,9 +508,18 @@ static void blit_to_fb_32bpp_sse2_bgr(uint32_t *dst, const uint16_t *src, int co
         __m128i result_lo = _mm_or_si128(_mm_or_si128(r_lo, g_lo), b_lo);
         __m128i result_hi = _mm_or_si128(_mm_or_si128(r_hi, g_hi), b_hi);
         
-        _mm_storeu_si128((__m128i*)(dst + i), result_lo);
-        _mm_storeu_si128((__m128i*)(dst + i + 4), result_hi);
+        /* Use streaming stores for aligned VRAM writes, unaligned for safety */
+        if (use_streaming) {
+            _mm_stream_si128((__m128i*)(dst + i), result_lo);
+            _mm_stream_si128((__m128i*)(dst + i + 4), result_hi);
+        } else {
+            _mm_storeu_si128((__m128i*)(dst + i), result_lo);
+            _mm_storeu_si128((__m128i*)(dst + i + 4), result_hi);
+        }
     }
+    
+    /* SFENCE required after streaming stores */
+    if (use_streaming) _mm_sfence();
     
     for (; i < count; i++) {
         uint16_t pixel = src[i];
@@ -604,6 +671,7 @@ static void blit_frame(uint8_t *fbmem, int fb_w, int fb_h, int line_len, int bpp
 }
 
 /* Blit with double buffering - write to back buffer and pan */
+/* Optimized: uses damage tracking to restore only the animation area from background */
 static void blit_frame_dblbuf(uint8_t *fbmem, int fb_w, int fb_h, int line_len, int bpp,
                               const uint16_t *frame, int fw, int fh, int x, int y,
                               int r_off, int g_off, int b_off) {
@@ -611,7 +679,53 @@ static void blit_frame_dblbuf(uint8_t *fbmem, int fb_w, int fb_h, int line_len, 
     int back_page = 1 - fb_page;
     uint8_t *back_buf = fbmem + back_page * fb_yres * line_len;
     
-    /* Blit to back buffer */
+#if DISPLAY_MODE == 1 || DISPLAY_MODE == 2
+    /* Damage tracking optimization for animation-on-background modes:
+     * Instead of blitting the entire background (e.g., 1080p = 4MB),
+     * restore only the damaged area (animation rectangle) from bg_buffer.
+     * For 64x64 animation: 64*64*4 = 16KB vs 4MB = 250x less PCIe bandwidth.
+     */
+    static int prev_x = -9999, prev_y = -9999;
+    
+    /* Restore previous animation area from background (damage restore) */
+    if (prev_x >= 0 && prev_y >= 0) {
+        /* Clip to framebuffer bounds */
+        int restore_x = prev_x;
+        int restore_y = prev_y;
+        int restore_w = fw;
+        int restore_h = fh;
+        if (restore_x < 0) { restore_w += restore_x; restore_x = 0; }
+        if (restore_y < 0) { restore_h += restore_y; restore_y = 0; }
+        if (restore_x + restore_w > fb_w) restore_w = fb_w - restore_x;
+        if (restore_y + restore_h > fb_h) restore_h = fb_h - restore_y;
+        
+        if (restore_w > 0 && restore_h > 0) {
+            /* Copy damaged area from bg_buffer to back_buf */
+            for (int dy = 0; dy < restore_h; dy++) {
+                int src_y = restore_y + dy;
+                int dst_y = restore_y + dy;
+                const uint16_t *src_row = bg_buffer + src_y * BG_W + restore_x;
+                
+                if (bpp == 32) {
+                    uint32_t *dst_row = (uint32_t *)(back_buf + dst_y * line_len + restore_x * 4);
+                    for (int dx = 0; dx < restore_w; dx++) {
+                        uint16_t pixel = src_row[dx];
+                        uint32_t r = (pixel >> 11) & 0x1F;
+                        uint32_t g = (pixel >> 5) & 0x3F;
+                        uint32_t b = pixel & 0x1F;
+                        dst_row[dx] = ((r << 3) << r_off) | ((g << 2) << g_off) | ((b << 3) << b_off);
+                    }
+                } else if (bpp == 16) {
+                    uint16_t *dst_row = (uint16_t *)(back_buf + dst_y * line_len + restore_x * 2);
+                    for (int dx = 0; dx < restore_w; dx++) {
+                        dst_row[dx] = src_row[dx];
+                    }
+                }
+            }
+        }
+    }
+    
+    /* Blit new frame to back buffer */
     if (bpp == 32) {
         blit_to_fb_32bpp(back_buf, fb_w, fb_h, line_len, frame, fw, fh, x, y, r_off, g_off, b_off);
     } else if (bpp == 16) {
@@ -620,13 +734,51 @@ static void blit_frame_dblbuf(uint8_t *fbmem, int fb_w, int fb_h, int line_len, 
         blit_to_fb_24bpp(back_buf, fb_w, fb_h, line_len, frame, fw, fh, x, y, r_off, g_off, b_off);
     }
     
+    /* Store current position for next frame's damage restore */
+    prev_x = x;
+    prev_y = y;
+#else
+    /* Non-background modes: full blit (no damage tracking possible) */
+    if (bpp == 32) {
+        blit_to_fb_32bpp(back_buf, fb_w, fb_h, line_len, frame, fw, fh, x, y, r_off, g_off, b_off);
+    } else if (bpp == 16) {
+        blit_to_fb_16bpp(back_buf, fb_w, fb_h, line_len, frame, fw, fh, x, y);
+    } else if (bpp == 24) {
+        blit_to_fb_24bpp(back_buf, fb_w, fb_h, line_len, frame, fw, fh, x, y, r_off, g_off, b_off);
+    }
+#endif
+    
     /* Pan to back buffer */
     fb_vinfo.yoffset = back_page * fb_yres;
     fb_vinfo.xoffset = 0;
     
-    /* Wait for VSync then pan - FBIO_WAITFORVSYNC expects __u32* */
-    __u32 vsync_arg = 0;
-    ioctl(fb_fd, FBIO_WAITFORVSYNC, (unsigned long)&vsync_arg);
+    /* Wait for VSync with timeout protection
+     * Some buggy fbdev drivers hang on FBIO_WAITFORVSYNC.
+     * Use SIGALRM to interrupt after 1 second; if interrupted, skip vsync entirely.
+     * NOTE: Must use a real handler (not SIG_IGN) to interrupt blocking ioctl with EINTR.
+     */
+    static int vsync_skip = 0;  /* Skip vsync if previous attempt timed out */
+    
+    if (!vsync_skip) {
+        /* Dummy handler - exists solely to interrupt blocking syscalls */
+        void vsync_alarm_handler(int sig) { (void)sig; }
+        
+        /* Set up one-shot alarm to interrupt blocking ioctl */
+        struct sigaction sa = { .__sa_handler = { .sa_handler = vsync_alarm_handler }, .sa_flags = 0 };
+        rt_sigaction(SIGALRM, &sa, NULL, 8);
+        alarm(1);  /* 1 second timeout (generous for vsync) */
+        
+        __u32 vsync_arg = 0;
+        int ret = ioctl(fb_fd, FBIO_WAITFORVSYNC, (unsigned long)&vsync_arg);
+        
+        alarm(0);  /* Cancel alarm */
+        
+        /* If ioctl was interrupted (EINTR), driver is buggy - skip future vsyncs */
+        if (ret < 0) {
+            vsync_skip = 1;
+        }
+    }
+    
     ioctl(fb_fd, FBIOPAN_DISPLAY, (unsigned long)&fb_vinfo);
     
     fb_page = back_page;
@@ -717,19 +869,31 @@ int main(void) {
     /* Setup signal handlers for graceful termination */
     signal(SIGTERM, signal_handler);
     signal(SIGINT, signal_handler);
+    signal(SIGALRM, signal_handler);  /* For shutdown watchdog */
+    
+    /* Shutdown watchdog: auto-terminate after 5 seconds if SHUTDOWN_MODE is set
+     * This is more reliable than shell-based sleep/kill under heavy I/O load
+     * during system shutdown when pagecache is being flushed to disk.
+     */
+    if (getenv("SHUTDOWN_MODE")) {
+        alarm(5);  /* Auto-terminate after 5 seconds */
+    }
     
     /* Allocate frame buffer */
     frame_buffer = mmap(NULL, FRAME_W * FRAME_H * 2, PROT_READ | PROT_WRITE,
-                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                        MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE, -1, 0);
     if (frame_buffer == MAP_FAILED) {
+        write(2, "fbdev: Failed to allocate frame buffer (out of memory)\n", 55);
         return 1;
     }
     
 #if DISPLAY_MODE == 1 || DISPLAY_MODE == 2
     /* Allocate background buffer for animation-on-image modes */
     bg_buffer = mmap(NULL, BG_W * BG_H * 2, PROT_READ | PROT_WRITE,
-                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE, -1, 0);
     if (bg_buffer == MAP_FAILED) {
+        write(2, "fbdev: Failed to allocate background buffer (out of memory)\n", 59);
+        munmap(frame_buffer, FRAME_W * FRAME_H * 2);
         return 1;
     }
     /* Decompress background from palette + LZSS */
@@ -775,6 +939,7 @@ int main(void) {
     fb_size = finfo.smem_len;
     fbmem = mmap(NULL, fb_size, PROT_READ | PROT_WRITE, MAP_SHARED, fb_fd, 0);
     if (fbmem == MAP_FAILED) {
+        write(2, "fbdev: Failed to map framebuffer (device busy or no memory)\n", 59);
         close(fb_fd);
         return 1;
     }
@@ -788,10 +953,8 @@ int main(void) {
     size_t required_size = (size_t)vinfo.yres * 2 * finfo.line_length;
     if (vinfo.yres_virtual >= vinfo.yres * 2 && finfo.smem_len >= required_size) {
         fb_has_dblbuf = 1;
-        blit_func = blit_frame_dblbuf;
     } else {
         fb_has_dblbuf = 0;
-        blit_func = blit_frame;
     }
     
     /* Detect RGB bit offsets for 32bpp hardware compatibility */
@@ -846,8 +1009,13 @@ int main(void) {
     /* Main loop */
 #if DISPLAY_MODE == 3 || DISPLAY_MODE == 4
     /* Static image: just display and wait for termination signal */
-    blit_func(fbmem, vinfo.xres, vinfo.yres, finfo.line_length, vinfo.bits_per_pixel,
-              frame_buffer, FRAME_W, FRAME_H, x, y, r_off, g_off, b_off);
+    if (fb_has_dblbuf) {
+        blit_frame_dblbuf(fbmem, vinfo.xres, vinfo.yres, finfo.line_length, vinfo.bits_per_pixel,
+                          frame_buffer, FRAME_W, FRAME_H, x, y, r_off, g_off, b_off);
+    } else {
+        blit_frame(fbmem, vinfo.xres, vinfo.yres, finfo.line_length, vinfo.bits_per_pixel,
+                   frame_buffer, FRAME_W, FRAME_H, x, y, r_off, g_off, b_off);
+    }
     
     /* Sleep until signal received */
     while (!terminate_requested) {
@@ -884,9 +1052,14 @@ int main(void) {
             load_frame_0(frames[0], frame_sizes[0]);
         }
         
-        /* Blit current frame via function pointer (double buffer or single) */
-        blit_func(fbmem, vinfo.xres, vinfo.yres, finfo.line_length, vinfo.bits_per_pixel,
-                  frame_buffer, FRAME_W, FRAME_H, x, y, r_off, g_off, b_off);
+        /* Blit current frame (double buffer or single) */
+        if (fb_has_dblbuf) {
+            blit_frame_dblbuf(fbmem, vinfo.xres, vinfo.yres, finfo.line_length, vinfo.bits_per_pixel,
+                              frame_buffer, FRAME_W, FRAME_H, x, y, r_off, g_off, b_off);
+        } else {
+            blit_frame(fbmem, vinfo.xres, vinfo.yres, finfo.line_length, vinfo.bits_per_pixel,
+                       frame_buffer, FRAME_W, FRAME_H, x, y, r_off, g_off, b_off);
+        }
         
         /* Check for termination signal */
         if (terminate_requested) break;

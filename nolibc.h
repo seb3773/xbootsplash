@@ -43,9 +43,10 @@ typedef long int64_t;
 #define PROT_EXEC   0x4
 
 /* Memory mapping */
-#define MAP_SHARED  0x01
-#define MAP_PRIVATE 0x02
-#define MAP_ANONYMOUS 0x20
+#define MAP_SHARED      0x01
+#define MAP_PRIVATE     0x02
+#define MAP_ANONYMOUS   0x20
+#define MAP_POPULATE    0x80000  /* Pre-fault pages - avoids page faults on first access */
 
 /* Signal */
 #define SIGTERM     15
@@ -70,6 +71,8 @@ typedef long int64_t;
 #define SYS_ioctl   16
 #define SYS_rt_sigaction 13
 #define SYS_rt_sigprocmask 14
+#define SYS_select  23
+#define SYS_alarm   37
 #define SYS_clock_gettime 228
 
 /* Clock IDs for clock_gettime */
@@ -136,6 +139,26 @@ static inline __attribute__((always_inline)) long syscall6(long n, long a1, long
 }
 
 /* libc function replacements */
+/* Environment access - environ pointer is set by the kernel at process start */
+extern char **environ;
+
+static inline __attribute__((always_inline)) char *getenv(const char *name) {
+    if (!environ || !name) return NULL;
+    
+    size_t name_len = 0;
+    while (name[name_len]) name_len++;
+    
+    for (char **env = environ; *env; env++) {
+        char *e = *env;
+        size_t i = 0;
+        while (i < name_len && e[i] && e[i] != '=' && e[i] == name[i]) i++;
+        if (i == name_len && e[i] == '=') {
+            return e + name_len + 1;
+        }
+    }
+    return NULL;
+}
+
 static inline __attribute__((always_inline)) void exit(int status) {
     syscall1(SYS_exit, status);
     __builtin_unreachable();
@@ -158,7 +181,11 @@ static inline __attribute__((always_inline)) ssize_t write(int fd, const void *b
 }
 
 static inline __attribute__((always_inline)) void *mmap(void *addr, size_t length, int prot, int flags, int fd, long offset) {
-    return (void*)syscall6(SYS_mmap, (long)addr, length, prot, flags, fd, offset);
+    long ret = syscall6(SYS_mmap, (long)addr, length, prot, flags, fd, offset);
+    /* Kernel returns -errno in range [-4095, -1] for errors */
+    if (ret >= -4095L && ret < 0L)
+        return MAP_FAILED;
+    return (void*)ret;
 }
 
 static inline __attribute__((always_inline)) int munmap(void *addr, size_t length) {
@@ -169,15 +196,47 @@ static inline __attribute__((always_inline)) int ioctl(int fd, unsigned long req
     return (int)syscall3(SYS_ioctl, fd, request, arg);
 }
 
-/* memset - x86_64 rep stosb for minimal binary size */
+/* memset - x86_64 optimized: rep stosq for large fills, stosb for small/remainder */
 static inline __attribute__((always_inline)) void *memset(void *s, int c, size_t n) {
     void *ret = s;
-    __asm__ __volatile__ (
-        "rep stosb"
-        : "=D" (s), "=c" (n)
-        : "0" (s), "a" ((unsigned char)c), "1" (n)
-        : "memory"
-    );
+    
+    /* Expand byte to 64-bit value for stosq */
+    uint64_t val = (uint64_t)(unsigned char)c;
+    val |= val << 8;
+    val |= val << 16;
+    val |= val << 32;
+    
+    /* Use stosq for large aligned fills (>=64 bytes, 8-byte aligned) */
+    if (__builtin_expect(n >= 64 && ((unsigned long)s & 7) == 0, 0)) {
+        size_t qwords = n / 8;
+        size_t remainder = n % 8;
+        
+        __asm__ __volatile__ (
+            "rep stosq"
+            : "=D" (s), "=c" (qwords)
+            : "0" (s), "a" (val), "1" (qwords)
+            : "memory"
+        );
+        
+        /* Handle remainder bytes */
+        if (remainder > 0) {
+            __asm__ __volatile__ (
+                "rep stosb"
+                : "=D" (s), "=c" (remainder)
+                : "0" (s), "a" ((unsigned char)c), "1" (remainder)
+                : "memory"
+            );
+        }
+    } else {
+        /* Small or unaligned: use stosb */
+        __asm__ __volatile__ (
+            "rep stosb"
+            : "=D" (s), "=c" (n)
+            : "0" (s), "a" ((unsigned char)c), "1" (n)
+            : "memory"
+        );
+    }
+    
     return ret;
 }
 
@@ -269,7 +328,32 @@ static inline __attribute__((always_inline)) int nanosleep(const struct timespec
     return (int)syscall2(SYS_nanosleep, (long)req, (long)rem);
 }
 
+/* select() for timeout on blocking operations */
+typedef struct {
+    unsigned long fds_bits[16];
+} fd_set;
+#define FD_SET(fd, set) ((set)->fds_bits[(fd)/64] |= (1UL << ((fd) % 64)))
+#define FD_ZERO(set) ((set)->fds_bits[0] = (set)->fds_bits[1] = 0)
+#define FD_ISSET(fd, set) ((set)->fds_bits[(fd)/64] & (1UL << ((fd) % 64)))
+
+struct timeval {
+    long tv_sec;
+    long tv_usec;
+};
+
+static inline __attribute__((always_inline)) int select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, struct timeval *timeout) {
+    return (int)syscall5(SYS_select, nfds, (long)readfds, (long)writefds, (long)exceptfds, (long)timeout);
+}
+
+/* alarm() for timeout interrupts */
+#define SIGALRM 14
+
+static inline __attribute__((always_inline)) unsigned int alarm(unsigned int seconds) {
+    return (unsigned int)syscall1(SYS_alarm, seconds);
+}
+
 /* Signal handling - proper rt_sigaction implementation */
+typedef int sig_atomic_t;  /* POSIX: atomic type for signal handlers */
 typedef void (*sighandler_t)(int);
 #define SIG_DFL ((sighandler_t)0)
 #define SIG_IGN ((sighandler_t)1)

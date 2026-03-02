@@ -48,6 +48,43 @@ static int loop_mode = 1;      /* 0=no loop, 1=full loop, 2=partial loop */
 static int loop_start = 0;     /* Start frame for partial loop */
 static uint32_t bg_color = 0x000000;  /* RRGGBB */
 static char *bg_image_path = NULL;
+
+/* Secure temporary directory - created with mkdtemp to prevent symlink attacks */
+static char secure_tmpdir[256] = "";
+static int tmpdir_created = 0;
+
+/* Create secure temp directory on first use */
+static const char *get_secure_tmpdir(void) {
+    if (!tmpdir_created) {
+        snprintf(secure_tmpdir, sizeof(secure_tmpdir), "/tmp/xbs_XXXXXX");
+        if (mkdtemp(secure_tmpdir) == NULL) {
+            fprintf(stderr, "Error: Failed to create secure temp directory\n");
+            exit(1);
+        }
+        tmpdir_created = 1;
+    }
+    return secure_tmpdir;
+}
+
+/* Clean up temp directory at exit */
+static void cleanup_tmpdir(void) {
+    if (tmpdir_created && secure_tmpdir[0]) {
+        /* Remove all files in directory */
+        DIR *dir = opendir(secure_tmpdir);
+        if (dir) {
+            struct dirent *ent;
+            while ((ent = readdir(dir)) != NULL) {
+                if (ent->d_name[0] == '.') continue;
+                char filepath[512];
+                snprintf(filepath, sizeof(filepath), "%s/%s", secure_tmpdir, ent->d_name);
+                unlink(filepath);
+            }
+            closedir(dir);
+        }
+        rmdir(secure_tmpdir);
+        tmpdir_created = 0;
+    }
+}
 static int target_w = 0;
 static int target_h = 0;
 static int transp_warned = 0;  /* Only warn once about transparency */
@@ -158,6 +195,19 @@ static int compare_frames(const void *a, const void *b) {
     return ((frame_entry_t*)a)->index - ((frame_entry_t*)b)->index;
 }
 
+/* Compare frames by filename (path) - used before index extraction */
+static int compare_frames_by_path(const void *a, const void *b) {
+    const char *path_a = ((frame_entry_t*)a)->path;
+    const char *path_b = ((frame_entry_t*)b)->path;
+    if (!path_a || !path_b) return 0;
+    /* Compare just the filename part, not the full path */
+    const char *name_a = strrchr(path_a, '/');
+    const char *name_b = strrchr(path_b, '/');
+    name_a = name_a ? name_a + 1 : path_a;
+    name_b = name_b ? name_b + 1 : path_b;
+    return strcmp(name_a, name_b);
+}
+
 /* Execute command without shell interpretation (avoids injection) */
 static int exec_cmd(const char *prog, char *const argv[]) {
     pid_t pid = fork();
@@ -219,8 +269,9 @@ static int png_has_alpha(const char *path) {
 static char *flatten_png(const char *path, uint32_t bg_hex, char *tmp_path, size_t tmp_path_size) {
     static int counter = 0;
     
-    /* Create unique temp file path per image */
-    snprintf(tmp_path, tmp_path_size, "/tmp/flatten_%d_%d.png", getpid(), counter++);
+    /* Create unique temp file path in secure directory */
+    const char *tmpdir = get_secure_tmpdir();
+    snprintf(tmp_path, tmp_path_size, "%s/flatten_%d.png", tmpdir, counter++);
     
     /* Build convert command: flatten onto background color */
     char bg_color_str[16];
@@ -239,6 +290,12 @@ static char *flatten_png(const char *path, uint32_t bg_hex, char *tmp_path, size
     
     if (exec_cmd("convert", argv) != 0) {
         /* Fallback: just copy without flattening */
+        /* WARNING: This will cause visual distortion if PNG has alpha channel!
+         * The 32bpp RGBA will be interpreted as 24bpp RGB, shifting all pixels.
+         * User should ensure ImageMagick is properly installed for transparent PNGs.
+         */
+        fprintf(stderr, "Warning: ImageMagick convert failed for '%s'\n", path);
+        fprintf(stderr, "         Transparent PNG will not be flattened - visual distortion may occur!\n");
         char *cp_argv[] = {(char *)"cp", (char *)path, tmp_path, NULL};
         exec_cmd("cp", cp_argv);
     }
@@ -479,12 +536,12 @@ overflow:
 }
 
 /* Sparse XOR compression (position + value for changed pixels) */
-/* Worst case: 2 + count * 4 bytes (header + all pixels changed) */
-/* WARNING: Limited to frames <= 65535 pixels (16-bit index overflow) */
+/* Format: 4-byte header (changed count, 32-bit) + N * (4-byte position + 2-byte XOR) */
+/* Supports frames up to 4 billion pixels with minimal RAM overhead during boot */
 static size_t compress_sparse_xor(const uint16_t *curr, const uint16_t *prev, int count, uint8_t *out, size_t out_size) {
-    /* Validate frame size for 16-bit pixel indices */
-    if (count > 65535) {
-        fprintf(stderr, "Warning: Sparse XOR not suitable for frames > 65535 pixels (frame has %d)\n", count);
+    /* Validate frame size for 32-bit pixel indices (practical limit: 2^31) */
+    if (count > 2147483647) {
+        fprintf(stderr, "Warning: Sparse XOR not suitable for frames > 2^31 pixels (frame has %d)\n", count);
         return 0;
     }
     
@@ -497,18 +554,24 @@ static size_t compress_sparse_xor(const uint16_t *curr, const uint16_t *prev, in
         if ((curr[i] ^ prev[i]) != 0) changed++;
     }
     
-    /* Header: number of changed pixels (16-bit) */
-    if (pos + 2 > max_pos) goto overflow;
+    /* Header: number of changed pixels (32-bit) */
+    if (pos + 4 > max_pos) goto overflow;
     out[pos++] = changed & 0xFF;
     out[pos++] = (changed >> 8) & 0xFF;
+    out[pos++] = (changed >> 16) & 0xFF;
+    out[pos++] = (changed >> 24) & 0xFF;
     
-    /* For each changed pixel: position (16-bit) + XOR value (16-bit) */
+    /* For each changed pixel: position (32-bit) + XOR value (16-bit) */
     for (int i = 0; i < count; i++) {
         uint16_t delta = curr[i] ^ prev[i];
         if (delta != 0) {
-            if (pos + 4 > max_pos) goto overflow;
+            if (pos + 6 > max_pos) goto overflow;
+            /* Position: 32-bit little-endian */
             out[pos++] = i & 0xFF;
             out[pos++] = (i >> 8) & 0xFF;
+            out[pos++] = (i >> 16) & 0xFF;
+            out[pos++] = (i >> 24) & 0xFF;
+            /* XOR value: 16-bit little-endian */
             out[pos++] = delta & 0xFF;
             out[pos++] = (delta >> 8) & 0xFF;
         }
@@ -522,14 +585,19 @@ overflow:
 }
 
 /* Raw XOR compression (no compression, just XOR values) */
-static size_t compress_raw_xor(const uint16_t *curr, const uint16_t *prev, int count, uint8_t *out) {
-    size_t pos = 0;
+/* Output size: count * 2 bytes */
+static size_t compress_raw_xor(const uint16_t *curr, const uint16_t *prev, int count, uint8_t *out, size_t out_size) {
+    size_t required = (size_t)count * 2;
+    if (out_size < required) {
+        fprintf(stderr, "Error: Raw XOR buffer overflow (need %zu, have %zu)\n", required, out_size);
+        return 0;
+    }
     for (int i = 0; i < count; i++) {
         uint16_t delta = curr[i] ^ prev[i];
-        out[pos++] = delta & 0xFF;
-        out[pos++] = (delta >> 8) & 0xFF;
+        out[i*2] = delta & 0xFF;
+        out[i*2+1] = (delta >> 8) & 0xFF;
     }
-    return pos;
+    return required;
 }
 
 /* Raw RGB565 (no compression, direct pixel values) */
@@ -772,6 +840,9 @@ static void print_help(const char *prog) {
 int main(int argc, char *argv[]) {
     char *input_path = NULL;
     
+    /* Register cleanup handler for secure temp directory */
+    atexit(cleanup_tmpdir);
+    
     /* Parse arguments */
     int arg_idx = 1;
     while (arg_idx < argc) {
@@ -874,10 +945,11 @@ int main(int argc, char *argv[]) {
         char bg_color_str[16];
         
         snprintf(bg_color_str, sizeof(bg_color_str), "#%06X", bg_color);
-        snprintf(tmp_path, sizeof(tmp_path), "/tmp/splash_static_%d.png", getpid());
+        const char *tmpdir = get_secure_tmpdir();
+        snprintf(tmp_path, sizeof(tmp_path), "%s/splash_static.png", tmpdir);
         
         /* Convert to RGB, flatten alpha - handles colormap and transparent PNGs */
-        char png24_arg[32];
+        char png24_arg[512];
         snprintf(png24_arg, sizeof(png24_arg), "PNG24:%s", tmp_path);
         
         char *argv[] = {
@@ -989,9 +1061,7 @@ int main(int argc, char *argv[]) {
         /* Allocate arrays */
         frame_entry_t *frames = malloc(sizeof(frame_entry_t) * frame_count);
         int nframes = 0;
-        char tmpdir[256];
-        snprintf(tmpdir, sizeof(tmpdir), "/tmp/splash_frames_%d", getpid());
-        mkdir(tmpdir, 0755);
+        const char *tmpdir = get_secure_tmpdir();
         
         /* Second pass: collect frame filenames */
         while ((ent = readdir(dir)) != NULL && nframes < frame_count) {
@@ -1009,7 +1079,7 @@ int main(int argc, char *argv[]) {
         closedir(dir);
         
         /* Sort by filename first to ensure consistent reference frame */
-        qsort(frames, nframes, sizeof(frame_entry_t), compare_frames);
+        qsort(frames, nframes, sizeof(frame_entry_t), compare_frames_by_path);
         
         /* Second pass: extract frame indices using sorted first frame as reference */
         const char *reference_name = NULL;
@@ -1040,7 +1110,7 @@ int main(int argc, char *argv[]) {
             char bg_color_str[16];
             snprintf(bg_color_str, sizeof(bg_color_str), "#%06X", bg_color);
             
-            char png24_arg[32];
+            char png24_arg[512];
             snprintf(png24_arg, sizeof(png24_arg), "PNG24:%s", frames[i].tmp_path);
             
             char *argv[] = {
@@ -1067,6 +1137,20 @@ int main(int argc, char *argv[]) {
             frames[i].index = i;
             if (load_png(frames[i].tmp_path, &frame_imgs[i]) != 0) {
                 fprintf(stderr, "Error: Failed to load frame %d\n", i);
+                return 1;
+            }
+        }
+        
+        /* Validate all frames have consistent size */
+        int ref_w = frame_imgs[0].w;
+        int ref_h = frame_imgs[0].h;
+        for (int i = 1; i < nframes; i++) {
+            if (frame_imgs[i].w != ref_w || frame_imgs[i].h != ref_h) {
+                fprintf(stderr, "Error: Frame size mismatch!\n");
+                fprintf(stderr, "  Frame 0: %dx%d\n", ref_w, ref_h);
+                fprintf(stderr, "  Frame %d: %dx%d (file: %s)\n", 
+                        i, frame_imgs[i].w, frame_imgs[i].h, frames[i].path);
+                fprintf(stderr, "All frames must have the same dimensions.\n");
                 return 1;
             }
         }
@@ -1182,7 +1266,9 @@ int main(int argc, char *argv[]) {
                                                         frame_imgs[f-1].pixels, pixels, compressed[f], comp_buf_size);
                     break;
                 case COMPRESS_RAW:
-                    comp_sizes[f] = compress_raw_direct(frame_imgs[f].pixels, pixels, compressed[f]);
+                    /* RAW XOR for delta frames - no compression, just XOR values */
+                    comp_sizes[f] = compress_raw_xor(frame_imgs[f].pixels,
+                                                        frame_imgs[f-1].pixels, pixels, compressed[f], comp_buf_size);
                     break;
                 default:
                     comp_sizes[f] = compress_rle_xor(frame_imgs[f].pixels,
@@ -1334,7 +1420,7 @@ int main(int argc, char *argv[]) {
         }
         
         /* Sort by filename first to ensure consistent reference frame */
-        qsort(frames, nframes, sizeof(frame_entry_t), compare_frames);
+        qsort(frames, nframes, sizeof(frame_entry_t), compare_frames_by_path);
         
         /* Second pass: extract frame indices using sorted first frame as reference */
         const char *reference_name = NULL;
@@ -1363,7 +1449,7 @@ int main(int argc, char *argv[]) {
             char bg_color_str[16];
             snprintf(bg_color_str, sizeof(bg_color_str), "#%06X", bg_color);
             
-            char png24_arg[32];
+            char png24_arg[512];
             snprintf(png24_arg, sizeof(png24_arg), "PNG24:%s", frames[i].tmp_path);
             
             char *argv[] = {
@@ -1395,6 +1481,20 @@ int main(int argc, char *argv[]) {
             frames[i].index = i;
             if (load_png(frames[i].tmp_path, &frame_imgs[i]) != 0) {
                 fprintf(stderr, "Error: Failed to load frame %d\n", i);
+                return 1;
+            }
+        }
+        
+        /* Validate all frames have consistent size */
+        int ref_w = frame_imgs[0].w;
+        int ref_h = frame_imgs[0].h;
+        for (int i = 1; i < nframes; i++) {
+            if (frame_imgs[i].w != ref_w || frame_imgs[i].h != ref_h) {
+                fprintf(stderr, "Error: Frame size mismatch!\n");
+                fprintf(stderr, "  Frame 0: %dx%d\n", ref_w, ref_h);
+                fprintf(stderr, "  Frame %d: %dx%d (file: %s)\n", 
+                        i, frame_imgs[i].w, frame_imgs[i].h, frames[i].path);
+                fprintf(stderr, "All frames must have the same dimensions.\n");
                 return 1;
             }
         }
@@ -1532,7 +1632,9 @@ int main(int argc, char *argv[]) {
                                                         frame_imgs[f-1].pixels, pixels, compressed[f], comp_buf_size);
                     break;
                 case COMPRESS_RAW:
-                    comp_sizes[f] = compress_raw_direct(frame_imgs[f].pixels, pixels, compressed[f]);
+                    /* RAW XOR for delta frames - no compression, just XOR values */
+                    comp_sizes[f] = compress_raw_xor(frame_imgs[f].pixels,
+                                                        frame_imgs[f-1].pixels, pixels, compressed[f], comp_buf_size);
                     break;
                 default:
                     comp_sizes[f] = compress_rle_xor(frame_imgs[f].pixels,

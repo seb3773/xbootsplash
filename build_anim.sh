@@ -31,7 +31,7 @@
 set -e
 
 RED='\033[31m'
-GREEN='\033[32m'
+GREEN='\033[38;5;46m'
 YELLOW='\033[1;33m'
 BLUE='\033[34m'
 CYAN='\033[36m'
@@ -107,9 +107,19 @@ while [[ $# -gt 0 ]]; do
             INSTALL_EXISTING="$2"
             shift 2
             ;;
+        --install-type)
+            # Internal: preserve installation type across sudo re-exec
+            INSTALL_TYPE="$2"
+            shift 2
+            ;;
         --uninstall-only)
             # Internal: uninstall only (called with sudo)
             UNINSTALL_ONLY="1"
+            shift
+            ;;
+        --uninstall-all)
+            # Internal: uninstall all splash systems (called with sudo)
+            UNINSTALL_ALL="1"
             shift
             ;;
         -m|--mode)
@@ -158,20 +168,19 @@ done
 
 # Print functions
 print_header() {
-  echo -e "\n${CYAN}${BOLD}╔═══════════════════════════════════════════════════════════════════╗${NC}"
+  echo -e "${CYAN}${BOLD}╔═══════════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${CYAN}${BOLD}║${NC}           ___             _    ___       _           _            ${CYAN}${BOLD}║${NC}"
     echo -e "${CYAN}${BOLD}║${NC}      __  | . > ___  ___ _| |_ / __> ___ | | ___  ___| |_          ${CYAN}${BOLD}║${NC}"
     echo -e "${CYAN}${BOLD}║${NC}      \\ \\/| . \\/ . \\/ . \\ | |  \\__ \\| . \\| |<_> |<_-<| . |         ${CYAN}${BOLD}║${NC}"
     echo -e "${CYAN}${BOLD}║${NC}      /\\_\\|___/\\___/\\___/ |_|  <___/|  _/|_|<___|/__/|_|_|         ${CYAN}${BOLD}║${NC}"
     echo -e "${CYAN}${BOLD}║${NC}                                    |_|                            ${CYAN}${BOLD}║${NC}"
-    echo -e "${CYAN}${BOLD}║${NC}                                                                   ${CYAN}${BOLD}║${NC}"
     echo -e "${CYAN}${BOLD}║                XBOOTSPLASH ANIMATION BUILDER v1.0                 ${CYAN}${BOLD}║${NC}"
     echo -e "${CYAN}${BOLD}║                by seb3773-[ github.com/seb3773 ]-                 ${CYAN}${BOLD}║${NC}"
-    echo -e "${CYAN}${BOLD}╚═══════════════════════════════════════════════════════════════════╝${NC}\n"
+    echo -e "${CYAN}${BOLD}╚═══════════════════════════════════════════════════════════════════╝${NC}"
 }
 
 print_step() {
-    echo -e "${BLUE}${BOLD}[STEP $1]${NC} ${YELLOW}$2${NC}"
+    echo -e "${BLUE}${BOLD}────────────────[${WHITE}STEP${BOLD} $1${BLUE}${BOLD}]────[${YELLOW}$2${BLUE}${BOLD}]${NC}"
 }
 
 print_success() {
@@ -191,7 +200,7 @@ print_warning() {
 }
 
 ask_continue() {
-    echo -e "\n${BOLD}$1${NC} ${YELLOW}[Y/n]${NC}"
+    echo -e "\n${BOLD}$1${NC} ${YELLOW}[${CYAN}Y${YELLOW}/n]${NC}"
     read -r response
     case "$response" in
         [nN][oO]|[nN])
@@ -224,7 +233,7 @@ detect_screen_size() {
 get_object_size() {
     local file="$1"
     if [ -f "$file" ]; then
-        local size=$(identify -format "%wx%h" "$file" 2>/dev/null | head -1)
+        local size=$(identify -format "%wx%h" "$file" 2>/dev/null | head -1) || return 1
         if [ -n "$size" ]; then
             OBJECT_W=$(echo "$size" | cut -d'x' -f1)
             OBJECT_H=$(echo "$size" | cut -d'x' -f2)
@@ -679,27 +688,64 @@ analyze_frames() {
         
         # Get image size from first file with valid image
         if [ -z "$frame_size" ] && identify "$file" &>/dev/null; then
-            frame_size=$(identify -format "%wx%h" "$file")
+            frame_size=$(identify -format "%wx%h" "$file" 2>/dev/null) || true
         fi
         
     done < <(find "$dir" -maxdepth 1 -type f \( -name "*.png" -o -name "*.PNG" -o -name "*.jpg" -o -name "*.JPG" -o -name "*.jpeg" -o -name "*.JPEG" \) 2>/dev/null | sort)
     
+    # Store frame dimensions globally for summary
+    if [ -n "$frame_size" ]; then
+        FRAME_W=$(echo "$frame_size" | cut -d'x' -f1)
+        FRAME_H=$(echo "$frame_size" | cut -d'x' -f2)
+    fi
+    
     if [ $last_index -lt 0 ]; then
         print_error "Could not detect frame numbering pattern"
         print_warning "Filenames should contain numbers (e.g., frame_00.png, spin001.jpg)"
-        exit 1
+        return 1
+    fi
+    
+    # Validate filename consistency - all frames should follow the same pattern
+    local inconsistent_files=()
+    local pattern_prefix=$(echo "$first_frame" | sed 's/[0-9]/X/g' | sed 's/X.*//')
+    local pattern_suffix=$(echo "$first_frame" | sed 's/[0-9]/X/g' | sed 's/.*X//')
+    
+    while IFS= read -r file; do
+        local basename=$(basename "$file")
+        local check_prefix=$(echo "$basename" | sed 's/[0-9]/X/g' | sed 's/X.*//')
+        local check_suffix=$(echo "$basename" | sed 's/[0-9]/X/g' | sed 's/.*X//')
+        
+        # Check if prefix/suffix pattern matches (allowing for different number lengths)
+        if [ "$check_prefix" != "$pattern_prefix" ] || [ "$check_suffix" != "$pattern_suffix" ]; then
+            inconsistent_files+=("$basename")
+        fi
+    done < <(find "$dir" -maxdepth 1 -type f \( -name "*.png" -o -name "*.PNG" -o -name "*.jpg" -o -name "*.JPG" -o -name "*.jpeg" -o -name "*.JPEG" \) 2>/dev/null | sort)
+    
+    if [ ${#inconsistent_files[@]} -gt 0 ]; then
+        print_error "Inconsistent filename pattern detected!"
+        echo -e "  ${YELLOW}Expected pattern:${NC} ${pattern_prefix}<number>${pattern_suffix}"
+        echo -e "  ${YELLOW}Inconsistent files:${NC}"
+        for f in "${inconsistent_files[@]:0:5}"; do
+            echo -e "    ${RED}✗ $f${NC}"
+        done
+        if [ ${#inconsistent_files[@]} -gt 5 ]; then
+            echo -e "    ${YELLOW}... and $((${#inconsistent_files[@]} - 5)) more${NC}"
+        fi
+        echo -e "  ${CYAN}All frames must follow the same naming convention.${NC}"
+        print_warning "Please rename or remove inconsistent files, then select a directory again."
+        return 1
     fi
     
     # Display analysis results
-    echo -e "     ${BOLD}${GREEN}╔══════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "     ${BOLD}${GREEN}║                    ANALYSIS RESULTS                          ║${NC}"
-    echo -e "     ${BOLD}${GREEN}╠══════════════════════════════════════════════════════════════╣${NC}"
-    echo -e "     ${BOLD}${GREEN}║${NC} ${CYAN}Total frames:${NC}    $img_count"
-    echo -e "     ${BOLD}${GREEN}║${NC} ${CYAN}Frame size:${NC}      $frame_size pixels"
-    echo -e "     ${BOLD}${GREEN}║${NC} ${CYAN}First frame:${NC}     $first_frame (index $first_index)"
-    echo -e "     ${BOLD}${GREEN}║${NC} ${CYAN}Last frame:${NC}      $last_frame (index $last_index)"
-    echo -e "     ${BOLD}${GREEN}║${NC} ${CYAN}Index range:${NC}     $first_index → $last_index"
-    echo -e "     ${BOLD}${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo -e "     ${BOLD}${GREEN}════════════════════════════════════════════════════════════════${NC}"
+    echo -e "     ${BOLD}${GREEN}                     ANALYSIS RESULTS                           ${NC}"
+    echo -e "     ${BOLD}${GREEN}════════════════════════════════════════════════════════════════${NC}"
+    echo -e "     ${CYAN}Total frames:${NC}    $img_count"
+    echo -e "     ${CYAN}Frame size:${NC}      $frame_size pixels"
+    echo -e "     ${CYAN}First frame:${NC}     $first_frame (index $first_index)"
+    echo -e "     ${CYAN}Last frame:${NC}      $last_frame (index $last_index)"
+    echo -e "     ${CYAN}Index range:${NC}     $first_index → $last_index"
+    echo -e "     ${BOLD}${GREEN}════════════════════════════════════════════════════════════════${NC}"
     
     # Check for missing frames
     local expected_count=$((last_index - first_index + 1))
@@ -1000,7 +1046,7 @@ get_parameters() {
     if [ $DISPLAY_MODE -eq 0 ] || [ $DISPLAY_MODE -eq 1 ] || [ $DISPLAY_MODE -eq 3 ]; then
         echo -e "\n${BOLD}Background color:${NC}"
         echo -e "  ${CYAN}Format: RRGGBB (hex)${NC}"
-        echo -en "  Color [${CYAN}$BG_COLOR]${NC}: "
+        echo -en "  Color [${CYAN}$BG_COLOR${NC}]: "
         read -r input
         if [ -n "$input" ] && [[ "$input" =~ ^[0-9A-Fa-f]{6}$ ]]; then
             BG_COLOR="$input"
@@ -1009,10 +1055,9 @@ get_parameters() {
     
     # Frame delay for animation modes
     if [ $DISPLAY_MODE -le 2 ]; then
-        # Count frames for loop start validation
+        # Count frames for loop start validation (same filter as analysis)
         if [ -d "$FRAME_DIR" ]; then
-            local frames_list=($(find "$FRAME_DIR" -maxdepth 1 -name "*.png" -type f 2>/dev/null | sort))
-            local frame_count=${#frames_list[@]}
+            local frame_count=$(find "$FRAME_DIR" -maxdepth 1 -type f \( -name "*.png" -o -name "*.PNG" -o -name "*.jpg" -o -name "*.JPG" -o -name "*.jpeg" -o -name "*.JPEG" \) 2>/dev/null | wc -l)
         else
             local frame_count=0
         fi
@@ -1105,6 +1150,12 @@ get_parameters() {
         default_name="xbs_${img_name}"
     fi
     
+    # Truncate default name to 15 chars if needed
+    if [ ${#default_name} -gt 15 ]; then
+        default_name="${default_name:0:15}"
+    fi
+    
+    echo -e "  ${CYAN}Max 15 characters (kernel /proc/$PID/comm limit)${NC}"
     echo -e "  ${CYAN}Default: $default_name${NC}"
     echo -n "  ➤ Binary name [$default_name]: "
     read -r input
@@ -1118,16 +1169,56 @@ get_parameters() {
         BINARY="$default_name"
     fi
     
+    # Enforce 15 char limit (kernel truncates /proc/$PID/comm to 15 chars)
+    if [ ${#BINARY} -gt 15 ]; then
+        local original_name="$BINARY"
+        BINARY="${BINARY:0:15}"
+        echo -e "  ${YELLOW}⚠ Name truncated to 15 chars: $original_name → $BINARY${NC}"
+    fi
+    
     echo -e "  ${GREEN}Binary will be: $BINARY${NC}"
+    
+    # Show parameter summary and ask for confirmation
+    echo ""
+    echo -e "${BOLD}${CYAN}════════════════════════════════════════════════════════════════${NC}"
+    echo -e "${BOLD}${CYAN}                    BUILD PARAMETERS SUMMARY                      ${NC}"
+    echo -e "${BOLD}${CYAN}════════════════════════════════════════════════════════════════${NC}"
+    echo -e "  ${CYAN}Target resolution:${NC} ${SCREEN_W:-1920}x${SCREEN_H:-1080}"
+    echo -e "  ${CYAN}Mode:${NC}              $(case $DISPLAY_MODE in 0|1|2) echo "Animation on solid background" ;; 3) echo "Static image on solid background" ;; 4) echo "Full screen image" ;; esac)"
+    if [ $DISPLAY_MODE -le 2 ]; then
+        echo -e "  ${CYAN}Frames:${NC}            $FRAME_DIR"
+        echo -e "  ${CYAN}Frame size:${NC}        ${FRAME_W:-?}x${FRAME_H:-?}"
+        echo -e "  ${CYAN}Animation offset:${NC}   X=$FRAME_OFFSET_X, Y=$FRAME_OFFSET_Y"
+        echo -e "  ${CYAN}Frame delay:${NC}        $FRAME_DELAY ms"
+        case $LOOP_MODE in
+            0) echo -e "  ${CYAN}Loop mode:${NC}          No loop (stay on last frame)" ;;
+            1) echo -e "  ${CYAN}Loop mode:${NC}          Full loop (0→N, 0→N...)" ;;
+            2) echo -e "  ${CYAN}Loop mode:${NC}          Partial loop (0→N, then $LOOP_START→N...)" ;;
+        esac
+    elif [ $DISPLAY_MODE -eq 3 ]; then
+        echo -e "  ${CYAN}Image:${NC}             $FRAME_DIR"
+        echo -e "  ${CYAN}Position offset:${NC}    X=$FRAME_OFFSET_X, Y=$FRAME_OFFSET_Y"
+    else
+        echo -e "  ${CYAN}Image:${NC}             $FRAME_DIR (full screen)"
+    fi
+    echo -e "  ${CYAN}Background:${NC}         #$BG_COLOR"
+    echo -e "  ${CYAN}Binary name:${NC}        $BINARY"
+    echo -e "${BOLD}${CYAN}════════════════════════════════════════════════════════════════${NC}"
+    
+    if ! ask_yes_no "➤ Build with these parameters?"; then
+        echo -e "\n${YELLOW}Returning to mode selection...${NC}"
+        return 1  # Signal to restart from STEP 2
+    fi
 }
 
 # Build animation
 build_animation() {
     print_step "5" "Building splash..."
     
-    # Check generator exists
-    if [ ! -f "generate_splash" ]; then
+    # Check if generator needs recompilation (source newer than binary)
+    if [ ! -f "generate_splash" ] || [ "generate_splash.c" -nt "generate_splash" ]; then
         print_info "⚙ Compiling splash generator..."
+        rm -f generate_splash
         gcc -O2 -o generate_splash generate_splash.c -lpng -lm
         print_success "Generator compiled"
     fi
@@ -1217,11 +1308,36 @@ build_animation() {
         exit 1
     fi
     
-    print_success "Binary compiled"
-    
     # Get binary size
     local size=$(wc -c < "$BINARY" 2>/dev/null)
     local size_kb=$((size / 1024))
+    local size_mb=$((size / 1048576))
+    
+    # Hard limit: 15 MB maximum to prevent /boot partition saturation
+    # Large binaries can fill /boot during initramfs rebuild, requiring LiveUSB repair
+    local MAX_BINARY_SIZE=$((15 * 1048576))  # 15 MB in bytes
+    if [ $size -gt $MAX_BINARY_SIZE ]; then
+        print_error "Binary size (${size_mb} MB) exceeds maximum allowed (15 MB)"
+        echo ""
+        echo -e "${RED}═══════════════════════════════════════════════════════════════${NC}"
+        echo -e "${RED}  CRITICAL: Binary too large for safe initramfs installation${NC}"
+        echo -e "${RED}═══════════════════════════════════════════════════════════════${NC}"
+        echo ""
+        echo -e "${YELLOW}A binary this large could saturate /boot partition during${NC}"
+        echo -e "${YELLOW}initramfs rebuild, leaving the system unbootable.${NC}"
+        echo ""
+        echo -e "${CYAN}To reduce binary size:${NC}"
+        echo -e "  ${GREEN}•${NC} Reduce number of frames (current: ${size_mb} MB for ~${FRAME_COUNT:-unknown} frames)"
+        echo -e "  ${GREEN}•${NC} Use smaller frame dimensions"
+        echo -e "  ${GREEN}•${NC} Enable stronger compression (auto/rle_xor)"
+        echo -e "  ${GREEN}•${NC} Simplify graphics (fewer colors, less detail)"
+        echo ""
+        echo -e "${RED}Build aborted to protect system integrity.${NC}"
+        rm -f "$BINARY"
+        exit 1
+    fi
+    
+    print_success "Binary compiled"
     
     # Display results
     echo -e "\n${BOLD}${GREEN}════════════════════════════════════════════════════════════════${NC}"
@@ -1639,6 +1755,9 @@ install_standard() {
     # Rollback function for trap handler
     install_rollback() {
         local exit_code=$?
+        # Disarm traps immediately to prevent double-trigger on exit
+        trap - ERR INT TERM EXIT
+        
         # Only rollback if installation wasn't completed
         if [[ $install_completed -eq 0 ]]; then
             echo ""
@@ -1666,6 +1785,14 @@ install_standard() {
                     mv "$grub_backup" /boot/grub/grub.cfg
                     echo "  -> Restored /boot/grub/grub.cfg from backup"
                 fi
+            fi
+            
+            # Restore initramfs if backed up
+            if [[ -n "$initramfs_backup" && -f "$initramfs_backup" ]]; then
+                local current_initramfs="/boot/initrd.img-$(uname -r)"
+                [[ ! -f "$current_initramfs" ]] && current_initramfs="/boot/initramfs-$(uname -r).img"
+                mv "$initramfs_backup" "$current_initramfs"
+                echo "  -> Restored initramfs from backup"
             fi
             
             echo -e "${RED}=== Installation Aborted ===${NC}"
@@ -1837,11 +1964,34 @@ case "\$1" in prereqs) prereqs; exit 0;; esac
 
 . /scripts/functions
 
+# Wait for framebuffer device (fbdev mode)
+# efifb/vesafb may need a moment to initialize
+INIT_TOP_EOF
+
+    # Add device wait for fbdev mode
+    if [[ $USE_DRM -eq 0 ]]; then
+        cat >> "$inittop_tmp" << 'INIT_TOP_FBDEV_WAIT'
+if [ ! -c /dev/fb0 ]; then
+    # Wait up to 1 second for framebuffer to appear
+    for i in 1 2 3 4 5; do
+        sleep 0.2
+        [ -c /dev/fb0 ] && break
+    done
+fi
+INIT_TOP_FBDEV_WAIT
+    fi
+
+    cat >> "$inittop_tmp" << INIT_TOP_EOF
+
 # Start splash in background
 if [ -x /sbin/$BINARY ]; then
     /sbin/$BINARY &
     SPLASH_PID=\$!
     echo "\$SPLASH_PID" > /run/${BINARY}.pid
+    # Store start_time for PID recycling protection
+    # Field 22 in /proc/PID/stat is process start time in clock ticks
+    START_TIME=\$(awk '{print \$22}' /proc/\$SPLASH_PID/stat 2>/dev/null)
+    echo "\$START_TIME" > /run/${BINARY}.start_time
 fi
 INIT_TOP_EOF
     chmod +x "$inittop_tmp"
@@ -1869,30 +2019,54 @@ case "\$1" in prereqs) prereqs; exit 0;; esac
 
 . /scripts/functions
 
+INIT_BOTTOM_EOF
+
+    # Add DRM-specific CRTC restore FIRST (before killing splash)
+    # This prevents dangling CRTC if splash gets SIGKILL'd
+    if [[ $USE_DRM -eq 1 ]]; then
+        cat >> "$initbottom_tmp" << 'INIT_BOTTOM_DRM'
+# CRITICAL: Restore CRTC BEFORE killing splash process!
+# If splash is killed by SIGKILL (frozen system), the dumb buffer is destroyed
+# but CRTC still points to it, causing visual glitch (snow/noise).
+# Restoring CRTC first ensures display is valid even if SIGKILL follows.
+if [ -x /sbin/$BINARY ]; then
+    /sbin/$BINARY --restore-crtc 2>/dev/null || true
+fi
+
+INIT_BOTTOM_DRM
+    fi
+    
+    cat >> "$initbottom_tmp" << 'INIT_BOTTOM_KILL'
+
 # Stop splash animation safely
-# Verify process name before killing to avoid PID recycling race
+# Verify process name AND start_time before killing to avoid PID recycling race
+# This makes the system absolutely bulletproof against PID recycling attacks
 if [ -f /run/${BINARY}.pid ]; then
     PID=\$(cat /run/${BINARY}.pid 2>/dev/null)
     if [ -n "\$PID" ] && [ -d "/proc/\$PID" ]; then
         # Verify this is actually our binary (avoid PID recycling)
         COMM=\$(cat /proc/\$PID/comm 2>/dev/null)
         if [ "\$COMM" = "$BINARY" ]; then
-            kill "\$PID" 2>/dev/null || true
+            # Double-check with start_time (field 22 in /proc/PID/stat)
+            # This makes PID recycling absolutely impossible
+            SAVED_START=\$(cat /run/${BINARY}.start_time 2>/dev/null)
+            CURRENT_START=\$(awk '{print \$22}' /proc/\$PID/stat 2>/dev/null)
+            if [ -n "\$SAVED_START" ] && [ "\$SAVED_START" = "\$CURRENT_START" ]; then
+                kill "\$PID" 2>/dev/null || true
+            fi
         fi
     fi
-    rm -f /run/${BINARY}.pid
+    rm -f /run/${BINARY}.pid /run/${BINARY}.start_time
 fi
+INIT_BOTTOM_KILL
 
-# Restore CRTC for DRM mode (handles SIGKILL case)
-if [ -x /sbin/$BINARY ]; then
-    /sbin/$BINARY --restore-crtc 2>/dev/null || true
-fi
+    cat >> "$initbottom_tmp" << 'INIT_BOTTOM_FBDEV'
 
 # Clear framebuffer to black before handoff (fbdev mode)
 if [ -c /dev/fb0 ]; then
     dd if=/dev/zero of=/dev/fb0 2>/dev/null || true
 fi
-INIT_BOTTOM_EOF
+INIT_BOTTOM_FBDEV
     chmod +x "$initbottom_tmp"
     mv "$initbottom_tmp" /etc/initramfs-tools/scripts/init-bottom/$BINARY
     echo "  -> /etc/initramfs-tools/scripts/init-bottom/$BINARY"
@@ -1934,15 +2108,82 @@ INIT_BOTTOM_EOF
         echo -e "  -> ${free_mb}MB available (OK)"
     fi
     
+    # Backup initramfs before rebuild (critical for recovery)
+    local initramfs_backup="${initramfs_path}.bak.$$"
+    if [[ -f "$initramfs_path" ]]; then
+        cp "$initramfs_path" "$initramfs_backup"
+        echo "  -> Backed up initramfs to $initramfs_backup"
+    fi
+    
     # Rebuild initramfs
     echo ""
     echo -e "${GREEN}⚙ Rebuilding initramfs...${NC}"
-    if ! update-initramfs -u; then
+    
+    # Detect kernel version mismatch (user updated kernel but hasn't rebooted)
+    local running_kernel=$(uname -r)
+    local latest_kernel=""
+    
+    # Find latest installed kernel (Debian/Ubuntu)
+    if [[ -d /boot ]]; then
+        latest_kernel=$(ls /boot/vmlinuz-* 2>/dev/null | sort -V | tail -1 | sed 's|/boot/vmlinuz-||')
+    fi
+    
+    # Warn if running kernel is older than latest installed
+    if [[ -n "$latest_kernel" && "$running_kernel" != "$latest_kernel" ]]; then
+        echo -e "  ${YELLOW}⚠ Warning: Running kernel ($running_kernel) differs from latest installed ($latest_kernel)${NC}"
+        echo "     If you rebuild for running kernel only, the splash won't appear after reboot."
+        echo ""
+        echo -e "  ${CYAN}Options:${NC}"
+        echo "     1) Rebuild for RUNNING kernel only ($running_kernel)"
+        echo "     2) Rebuild for LATEST kernel only ($latest_kernel)"
+        echo "     3) Rebuild for ALL installed kernels"
+        echo ""
+        echo -en "  ${BOLD}Choice [1/2/3] (default: 2): ${NC}"
+        read -t 30 choice 2>/dev/null || choice="2"
+        
+        case "$choice" in
+            1)
+                echo -e "  ${YELLOW}Building for running kernel only${NC}"
+                KERNEL_TARGET="$running_kernel"
+                ;;
+            2)
+                echo -e "  ${GREEN}Building for latest kernel ($latest_kernel)${NC}"
+                KERNEL_TARGET="$latest_kernel"
+                ;;
+            3|*)
+                echo -e "  ${GREEN}Building for ALL kernels${NC}"
+                KERNEL_TARGET="all"
+                ;;
+        esac
+        echo ""
+    else
+        KERNEL_TARGET="$running_kernel"
+    fi
+    
+    # Rebuild initramfs with appropriate kernel target
+    local rebuild_cmd=""
+    if [[ "$KERNEL_TARGET" == "all" ]]; then
+        rebuild_cmd="update-initramfs -u -k all"
+    elif [[ -n "$KERNEL_TARGET" && "$KERNEL_TARGET" != "$running_kernel" ]]; then
+        rebuild_cmd="update-initramfs -u -k $KERNEL_TARGET"
+    else
+        rebuild_cmd="update-initramfs -u"
+    fi
+    
+    if ! $rebuild_cmd; then
         echo -e "  -> ${RED}✖ FAILED!${NC}"
+        # Restore initramfs backup immediately
+        if [[ -f "$initramfs_backup" ]]; then
+            mv "$initramfs_backup" "$initramfs_path"
+            echo -e "  -> ${YELLOW}Restored initramfs from backup${NC}"
+        fi
         install_rollback
         return 1
     fi
     echo "  -> Done"
+    
+    # Remove backup after successful rebuild
+    rm -f "$initramfs_backup"
     
     # Verify initramfs integrity
     echo -e "${GREEN}☉ Verifying initramfs integrity...${NC}"
@@ -2212,11 +2453,12 @@ install_shutdown() {
     fi
     
     # Install binary
-    echo -e "${GREEN}[2/3]⚙ Installing binary to /usr/local/sbin...${NC}"
-    mkdir -p /usr/local/sbin
+    echo -e "${GREEN}[2/3]⚙ Installing binary to /lib/systemd/system-shutdown...${NC}"
+    mkdir -p /lib/systemd/system-shutdown
     
-    # Use same name but in /usr/local/sbin for shutdown
-    local shutdown_binary="/usr/local/sbin/$BINARY"
+    # Install binary directly in system-shutdown directory
+    # This guarantees availability even if /usr is unmounted at shutdown time
+    local shutdown_binary="/lib/systemd/system-shutdown/$BINARY"
     
     if [[ -f "$shutdown_binary" ]]; then
         cp "$shutdown_binary" "${shutdown_binary}.bak"
@@ -2235,21 +2477,24 @@ install_shutdown() {
 #!/bin/sh
 # Bootsplash shutdown animation
 # Executed by systemd at the very end of shutdown/reboot
+# Binary is in same directory for guaranteed availability
+#
+# NOTE: Watchdog is handled internally by the C binary via alarm(5)
+# This is more reliable than shell-based sleep/kill under heavy I/O load
 
-# Start splash in background
-if [ -x /usr/local/sbin/xbs_* ]; then
-    # Find the installed shutdown binary
-    for bin in /usr/local/sbin/xbs_*; do
-        if [ -x "$bin" ]; then
-            "$bin" &
-            SPLASH_PID=$!
-            # Give animation time to run (systemd may kill abruptly)
-            sleep 2
-            wait $SPLASH_PID 2>/dev/null || true
-            break
-        fi
-    done
-fi
+# Get directory where this script is located
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Find and run the shutdown binary
+for bin in "$SCRIPT_DIR"/xbs_*; do
+    if [ -x "$bin" ]; then
+        # Run splash with SHUTDOWN_MODE to enable internal watchdog
+        # Binary will auto-terminate after 5 seconds via alarm(5)
+        # This avoids shell sleep/kill issues under heavy I/O during shutdown
+        SHUTDOWN_MODE=1 "$bin"
+        break
+    fi
+done
 SHUTDOWN_EOF
     
     chmod +x /lib/systemd/system-shutdown/bootsplash.shutdown
@@ -2274,7 +2519,7 @@ SHUTDOWN_EOF
 do_uninstall() {
     local revert_mode="${1:-false}"
     
-    echo -e "${YELLOW}=== Uninstalling bootsplash ===${NC}"
+    echo -e "${YELLOW}=== Uninstalling xbootsplash ===${NC}"
     echo ""
     
     local removed=0
@@ -2289,16 +2534,16 @@ do_uninstall() {
         fi
     done
     
-    # Also check for shutdown binaries
+    # Also check for shutdown binaries in systemd-shutdown directory
     local shutdown_binaries=()
-    for bin in /usr/local/sbin/xbs_*; do
+    for bin in /lib/systemd/system-shutdown/xbs_*; do
         if [[ -f "$bin" ]]; then
             shutdown_binaries+=("$(basename "$bin")")
         fi
     done
     
     if [ ${#installed_binaries[@]} -eq 0 ] && [ ${#shutdown_binaries[@]} -eq 0 ]; then
-        echo -e "${YELLOW}No xbs_* binaries found in /sbin or /usr/local/sbin${NC}"
+        echo -e "${YELLOW}No xbs_* binaries found in /sbin or /lib/systemd/system-shutdown${NC}"
     else
         if [ ${#installed_binaries[@]} -gt 0 ]; then
             echo -e "${GREEN}Found ${#installed_binaries[@]} boot binary(ies) in /sbin:${NC}"
@@ -2307,7 +2552,7 @@ do_uninstall() {
             done
         fi
         if [ ${#shutdown_binaries[@]} -gt 0 ]; then
-            echo -e "${GREEN}Found ${#shutdown_binaries[@]} shutdown binary(ies) in /usr/local/sbin:${NC}"
+            echo -e "${GREEN}Found ${#shutdown_binaries[@]} shutdown binary(ies) in /lib/systemd/system-shutdown:${NC}"
             for bin in "${shutdown_binaries[@]}"; do
                 echo "  - $bin (shutdown)"
             done
@@ -2315,7 +2560,7 @@ do_uninstall() {
         echo ""
         
         # Ask which to remove or remove all
-        echo -n "➤ Remove all? [Y/n/s for selective]: "
+        echo -en "${YELLOW}➤ Remove all? [${CYAN}Y${YELLOW}/n/s for selective]: "
         read -r remove_choice
         case "$remove_choice" in
             [nN])
@@ -2340,7 +2585,7 @@ do_uninstall() {
                 done
                 echo "  0) Cancel"
                 echo ""
-                echo -n "➤ Enter number: "
+                echo -en "${YELLOW}➤ Enter number: "
                 read -r selection
                 if [[ "$selection" =~ ^[0-9]+$ ]] && [[ "$selection" -ge 1 ]] && [[ "$selection" -le ${#all_bins[@]} ]]; then
                     local selected_bin="${all_bins[$((selection-1))]}"
@@ -2359,13 +2604,14 @@ do_uninstall() {
                         rm -f /etc/initramfs-tools/scripts/init-bottom/$selected_bin 2>/dev/null || true
                         rm -f /etc/initramfs-tools/scripts/init-bottom/${selected_bin}.bak 2>/dev/null || true
                         rm -f /run/${selected_bin}.pid 2>/dev/null || true
+                        rm -f /run/${selected_bin}.start_time 2>/dev/null || true
                         rm -f /run/${selected_bin}_crtc.info 2>/dev/null || true
                         echo "  -> Removed boot binary and associated files"
                         ((removed++))
                     else
                         # Shutdown binary
-                        rm -f /usr/local/sbin/$selected_bin
-                        rm -f /usr/local/sbin/${selected_bin}.bak 2>/dev/null || true
+                        rm -f /lib/systemd/system-shutdown/$selected_bin
+                        rm -f /lib/systemd/system-shutdown/${selected_bin}.bak 2>/dev/null || true
                         echo "  -> Removed shutdown binary"
                         ((removed++))
                     fi
@@ -2406,6 +2652,7 @@ do_uninstall() {
                     
                     # Remove PID file
                     rm -f /run/${bin}.pid 2>/dev/null || true
+                    rm -f /run/${bin}.start_time 2>/dev/null || true
                     
                     # Remove CRTC state file (DRM mode)
                     rm -f /run/${bin}_crtc.info 2>/dev/null || true
@@ -2416,9 +2663,9 @@ do_uninstall() {
                 # Remove shutdown binaries
                 for bin in "${shutdown_binaries[@]}"; do
                     echo -e "${GREEN}Removing shutdown splash: $bin...${NC}"
-                    rm -f /usr/local/sbin/$bin
-                    echo "  -> Removed /usr/local/sbin/$bin"
-                    rm -f /usr/local/sbin/${bin}.bak 2>/dev/null || true
+                    rm -f /lib/systemd/system-shutdown/$bin
+                    echo "  -> Removed /lib/systemd/system-shutdown/$bin"
+                    rm -f /lib/systemd/system-shutdown/${bin}.bak 2>/dev/null || true
                     ((removed++))
                 done
                 
@@ -2455,10 +2702,107 @@ do_uninstall() {
     if [[ $removed -gt 0 ]]; then
         echo ""
         echo -e "${GREEN}⚙ Rebuilding initramfs...${NC}"
-        if update-initramfs -u; then
-            echo "  -> Done"
+        
+        # Detect kernel version mismatch (user updated kernel but hasn't rebooted)
+        local running_kernel=$(uname -r)
+        local latest_kernel=""
+        if [[ -d /boot ]]; then
+            latest_kernel=$(ls /boot/vmlinuz-* 2>/dev/null | sort -V | tail -1 | sed 's|/boot/vmlinuz-||')
+        fi
+        
+        # Determine kernel target for rebuild
+        local KERNEL_TARGET="$running_kernel"
+        if [[ -n "$latest_kernel" && "$running_kernel" != "$latest_kernel" ]]; then
+            echo -e "  ${YELLOW}⚠ Warning: Running kernel ($running_kernel) differs from latest installed ($latest_kernel)${NC}"
+            echo ""
+            echo -e "  ${CYAN}Options:${NC}"
+            echo "     1) Rebuild for RUNNING kernel only ($running_kernel)"
+            echo "     2) Rebuild for LATEST kernel only ($latest_kernel)"
+            echo "     3) Rebuild for ALL installed kernels"
+            echo ""
+            echo -en "  ${BOLD}Choice [1/2/3] (default: 3): ${NC}"
+            read -t 30 choice 2>/dev/null || choice="3"
+            
+            case "$choice" in
+                1)
+                    echo -e "  ${YELLOW}Rebuilding for running kernel only${NC}"
+                    KERNEL_TARGET="$running_kernel"
+                    ;;
+                2)
+                    echo -e "  ${GREEN}Rebuilding for latest kernel ($latest_kernel)${NC}"
+                    KERNEL_TARGET="$latest_kernel"
+                    ;;
+                3|*)
+                    echo -e "  ${GREEN}Rebuilding for ALL kernels${NC}"
+                    KERNEL_TARGET="all"
+                    ;;
+            esac
+        fi
+        
+        local rebuild_ok=false
+        
+        # Try update-initramfs (Debian/Ubuntu)
+        if command -v update-initramfs &>/dev/null; then
+            local rebuild_cmd=""
+            if [[ "$KERNEL_TARGET" == "all" ]]; then
+                rebuild_cmd="update-initramfs -u -k all"
+            elif [[ -n "$KERNEL_TARGET" && "$KERNEL_TARGET" != "$(uname -r)" ]]; then
+                rebuild_cmd="update-initramfs -u -k $KERNEL_TARGET"
+            else
+                rebuild_cmd="update-initramfs -u"
+            fi
+            if $rebuild_cmd; then
+                echo "  -> Done (update-initramfs)"
+                rebuild_ok=true
+            else
+                echo -e "  -> ${RED}✖ update-initramfs FAILED!${NC}"
+            fi
+        # Try mkinitcpio (Arch Linux)
+        elif command -v mkinitcpio &>/dev/null; then
+            if mkinitcpio -P; then
+                echo "  -> Done (mkinitcpio)"
+                rebuild_ok=true
+            else
+                echo -e "  -> ${RED}✖ mkinitcpio FAILED!${NC}"
+            fi
+        # Try dracut (Fedora/RHEL)
+        elif command -v dracut &>/dev/null; then
+            local kernel_ver="$KERNEL_TARGET"
+            [[ "$kernel_ver" == "all" ]] && kernel_ver=$(uname -r)
+            if dracut --force /boot/initramfs-${kernel_ver}.img ${kernel_ver}; then
+                echo "  -> Done (dracut)"
+                rebuild_ok=true
+            else
+                echo -e "  -> ${RED}✖ dracut FAILED!${NC}"
+            fi
         else
-            echo -e "  -> ${RED}✖ FAILED!${NC}"
+            echo -e "  -> ${YELLOW}⚠ No supported initramfs builder found${NC}"
+            echo "     Supported: update-initramfs (Debian), mkinitcpio (Arch), dracut (Fedora)"
+            echo "     Please rebuild initramfs manually."
+        fi
+        
+        if [[ "$rebuild_ok" == "true" ]]; then
+            # Verify binary was removed from initramfs
+            local current_kernel=$(uname -r)
+            local initramfs_path="/boot/initrd.img-${current_kernel}"
+            [[ ! -f "$initramfs_path" ]] && initramfs_path="/boot/initramfs-${current_kernel}.img"
+            
+            if [[ -f "$initramfs_path" ]] && command -v lsinitramfs &>/dev/null; then
+                if lsinitramfs "$initramfs_path" 2>/dev/null | grep -q "sbin/xbs_"; then
+                    echo -e "  -> ${YELLOW}⚠ Warning: xbs_* binary still found in initramfs${NC}"
+                    echo "     This may be a cached image. Try: update-initramfs -u -k all"
+                else
+                    echo -e "  -> ${GREEN}✓ Verified: binary removed from initramfs${NC}"
+                fi
+            elif [[ -f "$initramfs_path" ]] && command -v lsinitcpio &>/dev/null; then
+                # Arch Linux uses lsinitcpio
+                if lsinitcpio "$initramfs_path" 2>/dev/null | grep -q "sbin/xbs_"; then
+                    echo -e "  -> ${YELLOW}⚠ Warning: xbs_* binary still found in initramfs${NC}"
+                else
+                    echo -e "  -> ${GREEN}✓ Verified: binary removed from initramfs${NC}"
+                fi
+            fi
+        else
             echo -e "${RED}initramfs rebuild failed. Check disk space and kernel version.${NC}"
             if [[ "$restored_backup" == "true" ]]; then
                 echo -e "${YELLOW}Backup was restored, but initramfs may be outdated.${NC}"
@@ -2472,7 +2816,7 @@ do_uninstall() {
         echo -e "${GREEN}=== Uninstall Complete ===${NC}"
         echo "Removed $removed file(s)"
     else
-        echo -e "${YELLOW}No bootsplash files found to remove${NC}"
+        echo -e "${YELLOW}No xbootsplash files found to remove${NC}"
     fi
 }
 
@@ -2540,10 +2884,6 @@ generate_preview() {
         # Scale percentage for resizing elements
         local scale=$(( pw * 100 / sw ))
         
-        # Scale offsets
-        local off_x=$(( FRAME_OFFSET_X * scale / 100 ))
-        local off_y=$(( FRAME_OFFSET_Y * scale / 100 ))
-        
         # GIF delay (centiseconds = ms / 10)
         local gif_delay=$(( FRAME_DELAY / 10 ))
         [ "$gif_delay" -lt 1 ] && gif_delay=1
@@ -2561,37 +2901,130 @@ generate_preview() {
         
         print_info "Processing $frame_count frames with ${FRAME_DELAY}ms delay..."
         
+        # Get frame dimensions (use first frame as reference)
+        local first_frame="${frames_list[0]}"
+        local frame_info=$(identify -format "%w %h" "$first_frame" 2>/dev/null)
+        local frame_w=$(echo "$frame_info" | cut -d' ' -f1)
+        local frame_h=$(echo "$frame_info" | cut -d' ' -f2)
+        
+        # Calculate scaled frame size
+        local scaled_w=$(( frame_w * scale / 100 ))
+        local scaled_h=$(( frame_h * scale / 100 ))
+        
+        # Calculate center position in preview, then add offset (like bootsplash does)
+        # bootsplash: y = (screen_h - frame_h) / 2 + VERTICAL_OFFSET
+        local center_x=$(( (pw - scaled_w) / 2 ))
+        local center_y=$(( (ph - scaled_h) / 2 ))
+        
+        # Apply offsets (relative to center, like bootsplash)
+        local off_x=$(( center_x + FRAME_OFFSET_X * scale / 100 ))
+        local off_y=$(( center_y + FRAME_OFFSET_Y * scale / 100 ))
+        
         # Create temporary background
         local tmp_bg="tmp_bg.png"
         if [ $DISPLAY_MODE -eq 0 ]; then
-            convert -size "${pw}x${ph}" "xc:#${BG_COLOR}" "$tmp_bg"
+            convert -size "${pw}x${ph}" "xc:#${BG_COLOR}" "$tmp_bg" || {
+                print_error "Failed to create background"
+                return 1
+            }
         else
-            convert "$BG_IMAGE" -resize "${pw}x${ph}!" "$tmp_bg"
+            convert "$BG_IMAGE" -resize "${pw}x${ph}!" "$tmp_bg" || {
+                print_error "Failed to resize background image"
+                rm -f "$tmp_bg"
+                return 1
+            }
         fi
 
-        # Generate GIF using -dispose background to avoid ghosting
-        # We use a subshell to generate the frame arguments to ensure proper sorting and options
-        local cmd=(convert -delay "$gif_delay" -loop "$loop_setting" -dispose background -page "${pw}x${ph}" "$tmp_bg" -dispose previous)
+        # Create temporary directory for composited frames
+        local tmp_dir="tmp_frames_$$"
+        mkdir -p "$tmp_dir"
         
+        # Composite each frame onto background (WYSIWYG - simulates framebuffer composition)
+        local i=0
+        local composite_failed=false
         for f in "${frames_list[@]}"; do
-            cmd+=("-page" "+${off_x}+${off_y}" "(" "$f" "-resize" "${scale}%" ")")
+            # Build geometry string (handle negative offsets correctly for ImageMagick)
+            local geom=""
+            if [[ $off_x -ge 0 && $off_y -ge 0 ]]; then
+                geom="+${off_x}+${off_y}"
+            elif [[ $off_x -ge 0 && $off_y -lt 0 ]]; then
+                geom="+${off_x}${off_y}"
+            elif [[ $off_x -lt 0 && $off_y -ge 0 ]]; then
+                geom="${off_x}+${off_y}"
+            else
+                geom="${off_x}${off_y}"
+            fi
+            
+            # Composite frame on background at scaled offset
+            if ! convert "$tmp_bg" \
+                \( "$f" -resize "${scale}%" \) \
+                -gravity NorthWest -geometry "$geom" \
+                -composite \
+                "${tmp_dir}/frame_$(printf '%04d' $i).png" 2>/dev/null; then
+                print_warning "Failed to composite frame: $(basename "$f")"
+                composite_failed=true
+            fi
+            i=$((i + 1))
         done
         
-        cmd+=("-layers" "Optimize" "$out_file")
+        # Check if any frames were composited
+        if [[ ! -f "${tmp_dir}/frame_0000.png" ]]; then
+            rm -rf "$tmp_dir" "$tmp_bg"
+            print_error "No frames could be composited"
+            return 1
+        fi
+        
+        # For partial loop mode, create one-shot animation showing loop effect
+        # GIF doesn't support partial loops, so we append loop section 3 times
+        if [ "$LOOP_MODE" -eq 2 ] && [ -n "$LOOP_START" ] && [ "$LOOP_START" -gt 0 ]; then
+            print_info "Partial loop: appending frames $LOOP_START→end 3 times for preview..."
+            
+            local loop_frames=()
+            # Collect loop section frames (LOOP_START to end)
+            for f in "${tmp_dir}"/frame_*.png; do
+                local idx=$(basename "$f" | sed 's/frame_0*//' | sed 's/.png//')
+                # Skip if idx is not a valid number
+                [ -z "$idx" ] || ! [[ "$idx" =~ ^[0-9]+$ ]] && continue
+                if [ "$idx" -ge "$LOOP_START" ]; then
+                    loop_frames+=("$f")
+                fi
+            done
+            
+            # Append loop section 3 times
+            local append_idx=$frame_count
+            for rep in 1 2 3; do
+                for f in "${loop_frames[@]}"; do
+                    local src_idx=$(basename "$f" | sed 's/frame_0*//' | sed 's/.png//')
+                    cp "$f" "${tmp_dir}/frame_$(printf '%04d' $append_idx).png"
+                    append_idx=$((append_idx + 1))
+                done
+            done
+            
+            local total_frames=$append_idx
+            print_info "Preview will have $total_frames frames (original + 3× loop section)"
+        fi
+        
+        # Assemble composited frames into GIF (no loop for one-shot preview)
+        local gif_loop=0
+        [ "$LOOP_MODE" -eq 0 ] && gif_loop=1  # No loop mode: play once
+        local cmd=(convert -delay "$gif_delay" -loop "$gif_loop" "${tmp_dir}"/frame_*.png -layers Optimize "$out_file")
 
         if "${cmd[@]}" 2>build.log; then
-            rm -f "$tmp_bg"
+            rm -rf "$tmp_dir" "$tmp_bg"
             local fsize=$(du -h "$out_file" | cut -f1)
-            print_success "Preview generated: $out_file ($fsize, $frame_count frames)"
+            local display_count=${total_frames:-$frame_count}
+            print_success "Preview generated: $out_file ($fsize, $display_count frames)"
+            [[ "$composite_failed" == "true" ]] && print_warning "Some frames failed to composite"
             case $LOOP_MODE in
                 0) print_info "Loop: No (stops at last frame)" ;;
                 1) print_info "Loop: Full (0→N, 0→N...)" ;;
                 2) print_info "Loop: Partial (0→N, then $LOOP_START→N...)" ;;
             esac
         else
-            rm -f "$tmp_bg"
+            rm -rf "$tmp_dir" "$tmp_bg"
             print_error "Failed to generate preview GIF"
-            cat build.log
+            [[ -s build.log ]] && cat build.log
+            return 1
         fi
     else
         print_info "Skipping preview generation."
@@ -2634,7 +3067,7 @@ install_animation() {
                 print_info "✜ Re-running with sudo..."
                 # Convert BINARY to absolute path to avoid CWD issues under sudo
                 local abs_binary="$(cd "$(dirname "$BINARY")" 2>/dev/null && pwd)/$(basename "$BINARY")"
-                exec sudo "$0" --install-existing "$abs_binary"
+                exec sudo "$0" --install-existing "$abs_binary" --install-type shutdown
             fi
             install_shutdown
             ;;
@@ -2645,7 +3078,7 @@ install_animation() {
                 print_info "✜ Re-running with sudo..."
                 # Convert BINARY to absolute path to avoid CWD issues under sudo
                 local abs_binary="$(cd "$(dirname "$BINARY")" 2>/dev/null && pwd)/$(basename "$BINARY")"
-                exec sudo "$0" --install-existing "$abs_binary"
+                exec sudo "$0" --install-existing "$abs_binary" --install-type both
             fi
             echo ""
             echo -e "${CYAN}═══════════════════════════════════════${NC}"
@@ -2732,9 +3165,9 @@ install_boot_menu() {
 
 # Install existing xbs_* binary
 install_existing_binary() {
-    echo -e "\n${BLUE}========================================${NC}"
+    echo -e "\n${BLUE}}═══════════════════════════════════════${NC}"
     echo -e "${BLUE}   Install Existing Bootsplash Binary  ${NC}"
-    echo -e "${BLUE}========================================${NC}"
+    echo -e "${BLUE}}═══════════════════════════════════════${NC}"
     echo ""
     
     # Ask for directory to search
@@ -2897,14 +3330,330 @@ main() {
     show_main_menu
 }
 
+# Show current bootsplash status (boot and shutdown)
+show_bootsplash_status() {
+    echo ""
+    echo -e "${BLUE}════════════════════════════════════════════════════════════════${NC}"
+    echo -e "${BLUE}               BOOTSPLASH SYSTEM STATUS                         ${NC}"
+    echo -e "${BLUE}════════════════════════════════════════════════════════════════${NC}"
+    
+    # === BOOT PROCESS STATUS ===
+    echo -e "${BLUE}║${NC} ${BOLD}${CYAN}BOOT PROCESS:${NC}"
+    
+    local boot_status="No splash"
+    local boot_details=""
+    
+    # Check for xbs_* binary in /sbin (initramfs boot splash)
+    local xbs_boot=""
+    if [[ -d /etc/initramfs-tools/scripts/init-top ]]; then
+        xbs_boot=$(find /etc/initramfs-tools/scripts/init-top -name "xbs_*" -type f 2>/dev/null | head -1)
+    fi
+    if [[ -n "$xbs_boot" ]]; then
+        local bin_name=$(basename "$xbs_boot")
+        boot_status="xbsbootsplash"
+        boot_details="binary: $bin_name"
+    fi
+    
+    # Check for Plymouth
+    if command -v plymouthd &>/dev/null || [[ -f /usr/share/plymouth/themes/default.plymouth ]]; then
+        if [[ "$boot_status" != "No splash" ]]; then
+            boot_details="$boot_details + plymouth detected"
+        else
+            boot_status="Plymouth"
+            boot_details="theme: $(basename $(readlink /usr/share/plymouth/themes/default.plymouth 2>/dev/null) 2>/dev/null || echo 'default')"
+        fi
+    fi
+    
+    # Check for custom fbcondecor/fbsplash (Gentoo/Sabayon)
+    if [[ -f /etc/conf.d/splash ]]; then
+        if [[ "$boot_status" == "No splash" ]]; then
+            boot_status="fbsplash"
+            boot_details="config: /etc/conf.d/splash"
+        fi
+    fi
+    
+    # Check kernel cmdline for splash parameters
+    local cmdline_splash=""
+    if [[ -f /proc/cmdline ]]; then
+        cmdline_splash=$(cat /proc/cmdline 2>/dev/null | grep -oE 'splash|plymouth\.[^ ]*|bootsplash\.[^ ]*' | head -3)
+    fi
+    
+    echo -e "${NC}   Status: ${GREEN}$boot_status${NC}"
+    [[ -n "$boot_details" ]] && echo -e "${BLUE}║${NC}   Details: $boot_details"
+    [[ -n "$cmdline_splash" ]] && echo -e "${BLUE}║${NC}   Kernel params: $cmdline_splash"
+    
+    # === SHUTDOWN PROCESS STATUS ===
+    echo -e "${NC}"
+    echo -e "${NC} ${BOLD}${CYAN}SHUTDOWN PROCESS:${NC}"
+    
+    local shutdown_status="No splash"
+    local shutdown_details=""
+    
+    # Check for xbs_* in /lib/systemd/system-shutdown (shutdown splash)
+    local xbs_shutdown=""
+    if [[ -d /lib/systemd/system-shutdown ]]; then
+        xbs_shutdown=$(find /lib/systemd/system-shutdown -name "xbs_*" -type f -executable 2>/dev/null | head -1)
+    fi
+    if [[ -n "$xbs_shutdown" ]]; then
+        local shutdown_bin=$(basename "$xbs_shutdown")
+        shutdown_status="xbsbootsplash"
+        shutdown_details="binary: $shutdown_bin"
+    fi
+    
+    # Check for systemd-shutdown script
+    if [[ -f /lib/systemd/system-shutdown/bootsplash.shutdown ]]; then
+        if [[ "$shutdown_status" != "No splash" ]]; then
+            shutdown_details="$shutdown_details + systemd hook"
+        else
+            shutdown_status="Custom script"
+            shutdown_details="systemd-shutdown/bootsplash.shutdown"
+        fi
+    fi
+    
+    # Check for Plymouth shutdown (Plymouth handles shutdown via systemd integration)
+    # If Plymouth is installed and active, it handles both boot and shutdown
+    if [[ "$boot_status" == "Plymouth" ]] || command -v plymouthd &>/dev/null || [[ -d /usr/share/plymouth ]]; then
+        if [[ "$shutdown_status" == "No splash" ]]; then
+            shutdown_status="Plymouth"
+            shutdown_details="systemd integration"
+        fi
+    fi
+    
+    echo -e "${NC}   Status: ${GREEN}$shutdown_status${NC}"
+    [[ -n "$shutdown_details" ]] && echo -e "${BLUE}║${NC}   Details: $shutdown_details"
+    
+    # === INSTALLED FILES SUMMARY ===
+    echo -e ""
+    echo -e "${NC} ${BOLD}${CYAN}INSTALLED FILES:${NC}"
+    
+    local has_files=false
+    
+    # Initramfs hooks
+    if [[ -d /etc/initramfs-tools/hooks ]]; then
+        local hooks=$(find /etc/initramfs-tools/hooks -name "xbs_*" -type f 2>/dev/null)
+        if [[ -n "$hooks" ]]; then
+            echo -e "${BLUE}║${NC}   Boot hooks:"
+            for h in $hooks; do
+                echo -e "${BLUE}║${NC}     - $h"
+            done
+            has_files=true
+        fi
+    fi
+    
+    # Initramfs scripts
+    if [[ -d /etc/initramfs-tools/scripts/init-top ]]; then
+        local inittop=$(find /etc/initramfs-tools/scripts/init-top -name "xbs_*" -type f 2>/dev/null)
+        if [[ -n "$inittop" ]]; then
+            echo -e "${NC}   Init-top scripts:"
+            for s in $inittop; do
+                echo -e "${NC}     - $s"
+            done
+            has_files=true
+        fi
+    fi
+    
+    if [[ -d /etc/initramfs-tools/scripts/init-bottom ]]; then
+        local initbottom=$(find /etc/initramfs-tools/scripts/init-bottom -name "xbs_*" -type f 2>/dev/null)
+        if [[ -n "$initbottom" ]]; then
+            echo -e "${NC}   Init-bottom scripts:"
+            for s in $initbottom; do
+                echo -e "${NC}     - $s"
+            done
+            has_files=true
+        fi
+    fi
+    
+    # /sbin binaries
+    local sbin_bins=$(find /sbin -name "xbs_*" -type f -executable 2>/dev/null)
+    if [[ -n "$sbin_bins" ]]; then
+        echo -e "${NC}   Boot binaries (/sbin):"
+        for b in $sbin_bins; do
+            local bsize=$(du -h "$b" 2>/dev/null | cut -f1)
+            echo -e "${NC}     - $b ($bsize)"
+        done
+        has_files=true
+    fi
+    
+    # Shutdown binaries
+    local shutdown_bins=$(find /lib/systemd/system-shutdown -name "xbs_*" -type f -executable 2>/dev/null)
+    if [[ -n "$shutdown_bins" ]]; then
+        echo -e "${NC}   Shutdown binaries (/lib/systemd/system-shutdown):"
+        for b in $shutdown_bins; do
+            local bsize=$(du -h "$b" 2>/dev/null | cut -f1)
+            echo -e "${NC}     - $b ($bsize)"
+        done
+        has_files=true
+    fi
+    
+    # Systemd shutdown script
+    if [[ -f /lib/systemd/system-shutdown/bootsplash.shutdown ]]; then
+        echo -e "${NC}   Systemd shutdown: /lib/systemd/system-shutdown/bootsplash.shutdown"
+        has_files=true
+    fi
+    
+    if [[ "$has_files" == "false" ]]; then
+        echo -e "${NC}   ${YELLOW}No xbsbootsplash files installed${NC}"
+    fi
+    
+    echo -e "${BLUE}════════════════════════════════════════════════════════════════${NC}"
+    echo ""
+}
+
+# Uninstall ALL detected splash systems
+uninstall_all_splash() {
+    echo ""
+    echo -e "${RED}${BOLD}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${RED}${BOLD}║         UNINSTALL ALL SPLASH SYSTEMS                         ║${NC}"
+    echo -e "${RED}${BOLD}╚══════════════════════════════════════════════════════════════╝${NC}"
+    
+    # Show current status first
+    show_bootsplash_status
+    
+    # Detect what needs to be removed
+    local to_remove=()
+    local has_plymouth=false
+    local has_xbs=false
+    local has_fbsplash=false
+    
+    # Check for xbsbootsplash
+    local xbs_files=""
+    xbs_files=$(find /etc/initramfs-tools/hooks -name "xbs_*" -type f 2>/dev/null)
+    xbs_files="$xbs_files $(find /etc/initramfs-tools/scripts/init-top -name "xbs_*" -type f 2>/dev/null)"
+    xbs_files="$xbs_files $(find /etc/initramfs-tools/scripts/init-bottom -name "xbs_*" -type f 2>/dev/null)"
+    xbs_files="$xbs_files $(find /sbin -name "xbs_*" -type f 2>/dev/null)"
+    xbs_files="$xbs_files $(find /lib/systemd/system-shutdown -name "xbs_*" -type f 2>/dev/null)"
+    
+    if [[ -n "$xbs_files" ]] || [[ -f /lib/systemd/system-shutdown/bootsplash.shutdown ]]; then
+        has_xbs=true
+        to_remove+=("xbsbootsplash")
+    fi
+    
+    # Check for Plymouth
+    if command -v plymouthd &>/dev/null || [[ -f /usr/share/plymouth/themes/default.plymouth ]]; then
+        has_plymouth=true
+        to_remove+=("Plymouth")
+    fi
+    
+    # Check for fbsplash
+    if [[ -f /etc/conf.d/splash ]]; then
+        has_fbsplash=true
+        to_remove+=("fbsplash")
+    fi
+    
+    if [[ ${#to_remove[@]} -eq 0 ]]; then
+        print_info "No splash systems detected."
+        return 0
+    fi
+    
+    # Show what will be removed
+    echo -e "${YELLOW}The following splash systems will be removed:${NC}"
+    for sys in "${to_remove[@]}"; do
+        echo -e "  ${RED}✗${NC} $sys"
+    done
+    echo ""
+    
+    # Confirm
+    echo -en "${YELLOW}➤ Proceed with removal? [y/${CYAN}N${YELLOW}]: ${NC}"
+    read -r confirm
+    if [[ ! $confirm =~ ^[Yy]$ ]]; then
+        print_info "Uninstall cancelled."
+        return 0
+    fi
+    
+    # Remove xbsbootsplash
+    if [[ "$has_xbs" == "true" ]]; then
+        echo ""
+        echo -e "${CYAN}[1/3] Removing xbsbootsplash...${NC}"
+        
+        # Remove initramfs files
+        find /etc/initramfs-tools/hooks -name "xbs_*" -type f -exec rm -f {} \; 2>/dev/null
+        find /etc/initramfs-tools/scripts/init-top -name "xbs_*" -type f -exec rm -f {} \; 2>/dev/null
+        find /etc/initramfs-tools/scripts/init-bottom -name "xbs_*" -type f -exec rm -f {} \; 2>/dev/null
+        find /sbin -name "xbs_*" -type f -exec rm -f {} \; 2>/dev/null
+        find /lib/systemd/system-shutdown -name "xbs_*" -type f -exec rm -f {} \; 2>/dev/null
+        rm -f /lib/systemd/system-shutdown/bootsplash.shutdown
+        
+        echo "  -> Removed xbsbootsplash files"
+    fi
+    
+    # Disable Plymouth (don't uninstall package, just disable)
+    if [[ "$has_plymouth" == "true" ]]; then
+        echo ""
+        echo -e "${CYAN}[2/3] Disabling Plymouth...${NC}"
+        
+        # Remove splash from kernel cmdline
+        if [[ -f /etc/default/grub ]]; then
+            if grep -q 'GRUB_CMDLINE_LINUX.*splash' /etc/default/grub || grep -q 'GRUB_CMDLINE_LINUX_DEFAULT.*splash' /etc/default/grub; then
+                sed -i 's/splash//g' /etc/default/grub
+                sed -i 's/plymouth\.[^ "]*//g' /etc/default/grub
+                echo "  -> Removed splash from GRUB config"
+                
+                # Update grub
+                if command -v update-grub &>/dev/null; then
+                    update-grub
+                    echo "  -> Updated GRUB"
+                fi
+            fi
+        fi
+        
+        # Disable plymouth service
+        if command -v systemctl &>/dev/null; then
+            systemctl disable plymouth 2>/dev/null || true
+            echo "  -> Disabled Plymouth systemd service"
+        fi
+        
+        echo -e "  ${YELLOW}Note: Plymouth package not uninstalled (use package manager to remove)${NC}"
+    fi
+    
+    # Disable fbsplash
+    if [[ "$has_fbsplash" == "true" ]]; then
+        echo ""
+        echo -e "${CYAN}[3/3] Disabling fbsplash...${NC}"
+        # Just warn - fbsplash config is distro-specific
+        echo -e "  ${YELLOW}Note: fbsplash detected. Edit /etc/conf.d/splash to disable.${NC}"
+    fi
+    
+    # Rebuild initramfs if needed
+    if [[ "$has_xbs" == "true" ]] || [[ "$has_plymouth" == "true" ]]; then
+        echo ""
+        echo -e "${GREEN}⚙ Rebuilding initramfs...${NC}"
+        
+        local rebuild_ok=false
+        if command -v update-initramfs &>/dev/null; then
+            if update-initramfs -u; then
+                echo "  -> Done (update-initramfs)"
+                rebuild_ok=true
+            fi
+        elif command -v mkinitcpio &>/dev/null; then
+            if mkinitcpio -P; then
+                echo "  -> Done (mkinitcpio)"
+                rebuild_ok=true
+            fi
+        elif command -v dracut &>/dev/null; then
+            if dracut --force; then
+                echo "  -> Done (dracut)"
+                rebuild_ok=true
+            fi
+        fi
+        
+        if [[ "$rebuild_ok" == "false" ]]; then
+            print_warning "Could not rebuild initramfs automatically. Please rebuild manually."
+        fi
+    fi
+    
+    echo ""
+    echo -e "${GREEN}=== All splash systems removed ===${NC}"
+}
+
 # Show main menu with optional DRM/fbdev toggle
 show_main_menu() {
-    echo ""
     print_step "1" "Select action..."
     echo -e "    ╭────────────────────────────────────────────╮ "
     echo -e "    │  ${CYAN}1)${NC} Build new splash animation/splash      │"
     echo -e "    │  ${CYAN}2)${NC} Install existing xbs_* binary          │"
-    echo -e "    │  ${CYAN}3)${NC} Uninstall bootsplash                   │"
+    echo -e "    │  ${CYAN}3)${NC} Uninstall xbootsplash                  │"
+    echo -e "    │  ${CYAN}4)${NC} Bootsplash current status              │"
+    echo -e "    │  ${CYAN}5)${NC} Uninstall ALL splash systems           │"
     if [[ $LIBDRM_AVAILABLE -eq 1 ]]; then
         if [[ $USE_DRM -eq 1 ]]; then
             echo -e "    │  ${CYAN}T)${NC} Toggle mode (current: ${GREEN}DRM${NC})             │"
@@ -2928,6 +3677,19 @@ show_main_menu() {
                 exec sudo "$0" --uninstall-only
             fi
             do_uninstall
+            exit 0
+            ;;
+        4)
+            show_bootsplash_status
+            show_main_menu
+            return
+            ;;
+        5)
+            if [[ $EUID -ne 0 ]]; then
+                print_info "This option requires root privileges"
+                exec sudo "$0" --uninstall-all
+            fi
+            uninstall_all_splash
             exit 0
             ;;
         [Tt])
@@ -2999,7 +3761,7 @@ show_main_menu() {
             fi
             
             if analyze_frames "$FRAME_DIR"; then
-                if ask_continue "Proceed with these frames?"; then
+                if ask_continue "➤ Proceed with these frames ?"; then
                     break
                 else
                     exit 0
@@ -3011,7 +3773,58 @@ show_main_menu() {
         fi
     done
     
-    get_parameters
+    # Get parameters - if user declines, restart from mode selection
+    while ! get_parameters; do
+        # User declined parameters - restart from STEP 2
+        select_mode
+        FRAME_DIR=""
+        while true; do
+            if [ -z "$FRAME_DIR" ] || [ ! -e "$FRAME_DIR" ]; then
+                if [ $DISPLAY_MODE -eq 3 ] || [ $DISPLAY_MODE -eq 4 ]; then
+                    echo -en "\n   ${YELLOW}➤ Enter the path to the static image (PNG/JPG) [or 'Q' to quit]: ${NC}"
+                else
+                    echo -en "\n   ${YELLOW}➤ Enter the directory containing frame images [or 'Q' to quit]: ${NC}"
+                fi
+                read -r FRAME_DIR
+                [ -z "$FRAME_DIR" ] && continue
+            fi
+            
+            if [[ "$FRAME_DIR" =~ ^[Qq]$ ]]; then
+                print_info "Operation cancelled by user."
+                exit 0
+            fi
+            
+            FRAME_DIR="${FRAME_DIR/#\~/$HOME}"
+            
+            if [ $DISPLAY_MODE -eq 3 ] || [ $DISPLAY_MODE -eq 4 ]; then
+                if [ ! -f "$FRAME_DIR" ]; then
+                    print_error "Image file not found: $FRAME_DIR"
+                    FRAME_DIR=""
+                    continue
+                fi
+                print_success "Image found: $FRAME_DIR"
+                break
+            else
+                if [ ! -d "$FRAME_DIR" ]; then
+                    print_error "Directory not found: $FRAME_DIR"
+                    FRAME_DIR=""
+                    continue
+                fi
+                
+                if analyze_frames "$FRAME_DIR"; then
+                    if ask_continue "➤ Proceed with these frames ?"; then
+                        break
+                    else
+                        exit 0
+                    fi
+                else
+                    FRAME_DIR=""
+                    continue
+                fi
+            fi
+        done
+    done
+    
     build_animation
     test_animation
     generate_preview
@@ -3031,13 +3844,39 @@ if [ -n "$INSTALL_EXISTING" ]; then
         USE_DRM=0
     fi
     
-    check_plymouth
-    install_standard
+    # Handle installation type (preserve context from sudo re-exec)
+    case "$INSTALL_TYPE" in
+        shutdown)
+            install_shutdown
+            ;;
+        both)
+            echo ""
+            echo -e "${CYAN}═══════════════════════════════════════${NC}"
+            echo -e "${CYAN}   Part 1/2: Boot Splash Installation   ${NC}"
+            echo -e "${CYAN}═══════════════════════════════════════${NC}"
+            check_plymouth
+            install_standard
+            echo ""
+            echo -e "${CYAN}═══════════════════════════════════════${NC}"
+            echo -e "${CYAN}   Part 2/2: Shutdown Splash Installation${NC}"
+            echo -e "${CYAN}═══════════════════════════════════════${NC}"
+            install_shutdown
+            ;;
+        boot|standard|"")
+            check_plymouth
+            install_standard
+            ;;
+    esac
     exit 0
 fi
 
 if [ -n "$UNINSTALL_ONLY" ]; then
     do_uninstall
+    exit 0
+fi
+
+if [ -n "$UNINSTALL_ALL" ]; then
+    uninstall_all_splash
     exit 0
 fi
 
