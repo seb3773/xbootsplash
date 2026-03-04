@@ -55,6 +55,9 @@ typedef long int64_t;
 #define SIGUSR1     10
 #define SIGUSR2     12
 
+/* Errno values (returned as negative from syscalls in freestanding) */
+#define EINTR       4   /* Interrupted system call */
+
 /* Signal actions for rt_sigaction */
 #define SA_SIGINFO  0x00000004
 #define SA_RESTART  0x10000000
@@ -77,6 +80,12 @@ typedef long int64_t;
 
 /* Clock IDs for clock_gettime */
 #define CLOCK_MONOTONIC_RAW 4
+
+/* Virtual Terminal ioctls - for text mode fallback */
+#define VT_ACTIVATE    0x5605  /* Activate specified VT */
+#define KDSETMODE      0x4B3A  /* Set text/graphics mode */
+#define KD_TEXT        0x00    /* Text mode */
+#define KD_GRAPHICS    0x01    /* Graphics mode */
 
 /* Inline syscall wrappers */
 static inline __attribute__((always_inline)) long syscall1(long n, long a1) {
@@ -119,6 +128,19 @@ static inline __attribute__((always_inline)) long syscall4(long n, long a1, long
         "syscall"
         : "=a"(ret)
         : "a"(n), "D"(a1), "S"(a2), "d"(a3), "r"(r10)
+        : "rcx", "r11", "memory"
+    );
+    return ret;
+}
+
+static inline __attribute__((always_inline)) long syscall5(long n, long a1, long a2, long a3, long a4, long a5) {
+    long ret;
+    register long r10 __asm__("r10") = a4;
+    register long r8 __asm__("r8") = a5;
+    __asm__ volatile (
+        "syscall"
+        : "=a"(ret)
+        : "a"(n), "D"(a1), "S"(a2), "d"(a3), "r"(r10), "r"(r8)
         : "rcx", "r11", "memory"
     );
     return ret;
@@ -207,7 +229,7 @@ static inline __attribute__((always_inline)) void *memset(void *s, int c, size_t
     val |= val << 32;
     
     /* Use stosq for large aligned fills (>=64 bytes, 8-byte aligned) */
-    if (__builtin_expect(n >= 64 && ((unsigned long)s & 7) == 0, 0)) {
+    if (__builtin_expect(n >= 64 && ((unsigned long)s & 7) == 0, 1)) {
         size_t qwords = n / 8;
         size_t remainder = n % 8;
         
@@ -379,7 +401,7 @@ struct sigaction {
     } __sa_handler;
     unsigned long sa_flags;
     void (*sa_restorer)(void);
-    unsigned long sa_mask[16];  /* sigset_t, 64-bit on x86_64 */
+    unsigned long sa_mask;  /* sigset_t: 64-bit on x86_64 (8 bytes, not 128) */
 };
 
 /* Restorer function for signal handler (required on x86_64) */

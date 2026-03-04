@@ -18,15 +18,39 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <time.h>
 #include <unistd.h>
+
+/* VT/ioctl constants for text mode fallback - may not be in all libc headers */
+#ifndef KDSETMODE
+#define KDSETMODE      0x4B3A
+#endif
+#ifndef KD_TEXT
+#define KD_TEXT        0x00
+#endif
+#ifndef VT_ACTIVATE
+#define VT_ACTIVATE    0x5605
+#endif
 
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
 /* Generated frame data */
 #include "frames_delta.h"
+
+#ifndef MAX_BOOT_TIMEOUT_SEC
+#define MAX_BOOT_TIMEOUT_SEC 180  /* 3 min - conservative for slow systems (RPi, RAID, fsck) */
+#endif
+
+#ifndef BG_OFFSET_X
+#define BG_OFFSET_X 0
+#endif
+
+#ifndef BG_OFFSET_Y
+#define BG_OFFSET_Y 0
+#endif
 
 /* CRTC state file for external restore after SIGKILL */
 #define CRTC_STATE_FILE "/run/xbs_drm_crtc.info"
@@ -101,6 +125,7 @@ static int decode_rle(const uint8_t *src, size_t src_len, uint16_t *dst, int dst
             /* Literal run: next N uint16_t values */
             int n = cmd;
             if (i + n * 2 > src_len) n = (src_len - i) / 2;
+            if (__builtin_expect(n > dst_count - pos, 0)) n = dst_count - pos;
             for (int j = 0; j < n && pos < dst_count; j++) {
                 dst[pos++] = src[i] | (src[i+1] << 8);
                 i += 2;
@@ -111,6 +136,7 @@ static int decode_rle(const uint8_t *src, size_t src_len, uint16_t *dst, int dst
             if (i + 1 >= src_len) break;
             uint16_t value = src[i] | (src[i+1] << 8);
             i += 2;
+            if (__builtin_expect(count > dst_count - pos, 0)) count = dst_count - pos;
             for (int j = 0; j < count && pos < dst_count; j++) {
                 dst[pos++] = value;
             }
@@ -135,6 +161,7 @@ static void apply_delta_rle_xor(const uint8_t *src, size_t src_len) {
             /* XOR values */
             int n = cmd;
             if (i + n * 2 > src_len) n = (src_len - i) / 2;
+            if (__builtin_expect(n > count - pos, 0)) n = count - pos;
             for (int j = 0; j < n && pos < count; j++) {
                 uint16_t delta = src[i] | (src[i+1] << 8);
                 frame_buffer[pos++] ^= delta;
@@ -142,7 +169,9 @@ static void apply_delta_rle_xor(const uint8_t *src, size_t src_len) {
             }
         } else {
             /* Skip unchanged pixels */
-            pos += (cmd & 0x7F) + 1;
+            int skip = (cmd & 0x7F) + 1;
+            if (__builtin_expect(skip > count - pos, 0)) pos = count;
+            else pos += skip;
         }
     }
 }
@@ -163,6 +192,7 @@ static void apply_delta_rle_direct(const uint8_t *src, size_t src_len) {
             /* Literal run: next N uint16_t values */
             int n = cmd;
             if (i + n * 2 > src_len) n = (src_len - i) / 2;
+            if (__builtin_expect(n > count - pos, 0)) n = count - pos;
             for (int j = 0; j < n && pos < count; j++) {
                 frame_buffer[pos++] = src[i] | (src[i+1] << 8);
                 i += 2;
@@ -173,6 +203,7 @@ static void apply_delta_rle_direct(const uint8_t *src, size_t src_len) {
             if (i + 1 >= src_len) break;
             uint16_t value = src[i] | (src[i+1] << 8);
             i += 2;
+            if (__builtin_expect(repeat > count - pos, 0)) repeat = count - pos;
             for (int j = 0; j < repeat && pos < count; j++) {
                 frame_buffer[pos++] = value;
             }
@@ -182,18 +213,26 @@ static void apply_delta_rle_direct(const uint8_t *src, size_t src_len) {
 
 /* Decode Sparse XOR delta (position + value for changed pixels) */
 static void apply_delta_sparse_xor(const uint8_t *delta, size_t delta_size) {
-    if (delta_size < 2) return;
-    
+    /* Format: 4-byte header (changed count, 32-bit) + N * (4-byte index + 2-byte XOR) */
+    if (delta_size < 4) return;
+ 
     size_t pos = 0;
-    int changed = delta[pos] | (delta[pos + 1] << 8);
-    pos += 2;
-    
-    for (int i = 0; i < changed && pos + 3 < delta_size; i++) {
-        int idx = delta[pos] | (delta[pos + 1] << 8);
-        uint16_t xor_val = delta[pos + 2] | (delta[pos + 3] << 8);
-        pos += 4;
-        
-        if (idx < FRAME_W * FRAME_H) {
+    size_t changed = (size_t)delta[pos] | ((size_t)delta[pos + 1] << 8) |
+                     ((size_t)delta[pos + 2] << 16) | ((size_t)delta[pos + 3] << 24);
+    pos += 4;
+
+    size_t max_changed = (delta_size - 4) / 6;
+    if (__builtin_expect(changed > max_changed, 0)) changed = max_changed;
+ 
+    const size_t max_pixels = (size_t)FRAME_W * (size_t)FRAME_H;
+ 
+    for (size_t i = 0; i < changed && pos + 5 < delta_size; i++) {
+        size_t idx = (size_t)delta[pos] | ((size_t)delta[pos + 1] << 8) |
+                     ((size_t)delta[pos + 2] << 16) | ((size_t)delta[pos + 3] << 24);
+        uint16_t xor_val = (uint16_t)delta[pos + 4] | ((uint16_t)delta[pos + 5] << 8);
+        pos += 6;
+ 
+        if (idx < max_pixels) {
             frame_buffer[idx] ^= xor_val;
         }
     }
@@ -233,9 +272,8 @@ static void decode_raw(const uint8_t *src, size_t src_len, uint16_t *dst, int ds
     int pixels = src_len / 2;
     if (pixels > dst_count) pixels = dst_count;
     
-    for (int i = 0; i < pixels; i++) {
-        dst[i] = src[i * 2] | (src[i * 2 + 1] << 8);
-    }
+    /* Direct copy: x86_64 little-endian, RGB565 bytes map directly to uint16_t */
+    memcpy(dst, src, pixels * 2);
 }
 
 /* Load frame 0 - always stored as raw RGB565 */
@@ -255,6 +293,7 @@ static void decompress_palette_lzss(const uint8_t *compressed, size_t comp_size,
     int window_pos = 0;
     int out_pos = 0;
     size_t in_pos = 0;
+    int bytes_written = 0;  /* Track bytes written to detect invalid back-refs */
     
     /* Initialize window */
     for (int i = 0; i < LZSS_WINDOW_SIZE; i++) window[i] = 0;
@@ -269,7 +308,8 @@ static void decompress_palette_lzss(const uint8_t *compressed, size_t comp_size,
                 /* Literal byte */
                 uint8_t val = compressed[in_pos++];
                 window[window_pos] = val;
-                window_pos = (window_pos + 1) % LZSS_WINDOW_SIZE;
+                window_pos = (window_pos + 1) & (LZSS_WINDOW_SIZE - 1);
+                bytes_written++;
                 
                 /* Expand via palette */
                 dst[out_pos++] = palette[val < palette_size ? val : 0];
@@ -282,12 +322,25 @@ static void decompress_palette_lzss(const uint8_t *compressed, size_t comp_size,
                 int offset = (b1 | ((b2 & 0xF0) << 4));
                 int length = (b2 & 0x0F) + LZSS_MIN_MATCH;
                 
+                /* Guard against invalid offset (corrupted data) */
+                if (offset == 0) offset = 1;
+                
+                /* Guard against back-reference before any literals (corrupted data) */
+                if (bytes_written == 0) {
+                    /* Invalid: back-ref with empty window - skip and continue */
+                    continue;
+                }
+                
+                /* Clamp offset to bytes written (corrupted data safety) */
+                if (offset > bytes_written) offset = bytes_written;
+                
                 /* Copy from window */
                 for (int i = 0; i < length && out_pos < pixel_count; i++) {
-                    int win_idx = (window_pos - offset + LZSS_WINDOW_SIZE) % LZSS_WINDOW_SIZE;
+                    int win_idx = (window_pos - offset + LZSS_WINDOW_SIZE) & (LZSS_WINDOW_SIZE - 1);
                     uint8_t val = window[win_idx];
                     window[window_pos] = val;
-                    window_pos = (window_pos + 1) % LZSS_WINDOW_SIZE;
+                    window_pos = (window_pos + 1) & (LZSS_WINDOW_SIZE - 1);
+                    bytes_written++;
                     
                     /* Expand via palette */
                     dst[out_pos++] = palette[val < palette_size ? val : 0];
@@ -416,6 +469,7 @@ static int drm_init(xbs_drm_ctx_t *ctx) {
     /* Open DRM device and find connected connector */
     int fd = -1;
     int found_card_idx = -1;
+    drmModeRes *res = NULL;  /* Keep resources from successful card */
     
     /* Scan all DRI cards (handles multi-GPU, eGPU systems)
      * CRITICAL: Must check for CONNECTED connector, not just dumb buffer capability!
@@ -439,7 +493,7 @@ static int drm_init(xbs_drm_ctx_t *ctx) {
         }
         
         /* Check for CONNECTED connector - this is the critical fix for multi-GPU */
-        drmModeRes *res = drmModeGetResources(fd);
+        res = drmModeGetResources(fd);
         if (!res) {
             close(fd);
             fd = -1;
@@ -458,14 +512,14 @@ static int drm_init(xbs_drm_ctx_t *ctx) {
             if (conn) drmModeFreeConnector(conn);
         }
         
-        drmModeFreeResources(res);
-        
         if (has_connected) {
             found_card_idx = card_idx;  /* Remember which card we're using */
-            break;  /* Found usable device with connected display */
+            break;  /* Found usable device with connected display, keep res */
         }
         
         /* No connected display on this card - try next */
+        drmModeFreeResources(res);
+        res = NULL;
         close(fd);
         fd = -1;
     }
@@ -486,20 +540,14 @@ static int drm_init(xbs_drm_ctx_t *ctx) {
         /* Don't fail - try to proceed with modesetting */
     }
     
-    /* Get resources */
-    drmModeRes *res = drmModeGetResources(fd);
-    if (!res) {
-        close(fd);
-        return -errno;
-    }
+    /* Use resources from successful card (already retrieved in loop above) */
     
     /* Find connected connector */
     ret = drm_find_connector(fd, res, ctx);
     if (ret < 0) {
         write(2, "DRM: No connector\n", 18);
         drmModeFreeResources(res);
-        close(fd);
-        return ret;
+        goto fail;
     }
     
     /* Find CRTC */
@@ -507,8 +555,7 @@ static int drm_init(xbs_drm_ctx_t *ctx) {
     if (ret < 0) {
         write(2, "DRM: No CRTC\n", 13);
         drmModeFreeResources(res);
-        close(fd);
-        return ret;
+        goto fail;
     }
     
     drmModeFreeResources(res);
@@ -517,8 +564,7 @@ static int drm_init(xbs_drm_ctx_t *ctx) {
     ret = drm_create_fb(fd, ctx);
     if (ret < 0) {
         write(2, "DRM: No framebuffer\n", 20);
-        close(fd);
-        return ret;
+        goto fail;
     }
     
     /* Save current CRTC state */
@@ -527,9 +573,21 @@ static int drm_init(xbs_drm_ctx_t *ctx) {
     /* Save to file for external restore after SIGKILL */
     save_crtc_state(ctx);
     
-    /* Set mode */
-    ret = drmModeSetCrtc(fd, ctx->crtc_id, ctx->fb_id, 0, 0, 
-                         &ctx->conn_id, 1, &ctx->mode);
+    /* Set mode with retry - EBUSY is common during early boot (GPU driver init) */
+    int retries = 5;
+    while (retries > 0) {
+        ret = drmModeSetCrtc(fd, ctx->crtc_id, ctx->fb_id, 0, 0, 
+                             &ctx->conn_id, 1, &ctx->mode);
+        if (ret == 0) break;
+        if (ret != -EBUSY) break;  /* Only retry on EBUSY */
+        
+        retries--;
+        if (retries > 0) {
+            /* 100ms backoff between retries */
+            struct timespec ts = { .tv_sec = 0, .tv_nsec = 100000000 };
+            nanosleep(&ts, NULL);
+        }
+    }
     if (ret < 0) {
         write(2, "DRM: CRTC failed\n", 17);
         drm_cleanup(ctx);
@@ -537,6 +595,13 @@ static int drm_init(xbs_drm_ctx_t *ctx) {
     }
     
     return 0;
+
+fail:
+    if (ctx->fd >= 0) {
+        close(ctx->fd);
+        ctx->fd = -1;
+    }
+    return ret;
 }
 
 static void drm_cleanup(xbs_drm_ctx_t *ctx) {
@@ -545,7 +610,7 @@ static void drm_cleanup(xbs_drm_ctx_t *ctx) {
     /* Mark framebuffer as dirty for virtual GPUs (VMware/QXL) before cleanup */
     /* This ensures the virtual GPU releases all resources before handoff to tty1 */
     if (ctx->fb_id) {
-        struct drm_mode_rect clip = {
+        struct drm_clip_rect clip = {
             .x1 = 0,
             .y1 = 0,
             .x2 = ctx->width,
@@ -569,6 +634,17 @@ static void drm_cleanup(xbs_drm_ctx_t *ctx) {
     
     /* Release DRM master */
     drmDropMaster(ctx->fd);
+    
+    /* Fallback: ensure text mode VT is available if CRTC had no previous buffer.
+     * This prevents black screen if login manager fails - user gets text console.
+     * Only needed when saved_crtc->buffer_id was 0 (no previous FB at early boot).
+     */
+    int tty_fd = open("/dev/tty0", O_RDWR, 0);
+    if (tty_fd >= 0) {
+        ioctl(tty_fd, KDSETMODE, KD_TEXT);
+        ioctl(tty_fd, VT_ACTIVATE, 1);  /* Activate VT1 */
+        close(tty_fd);
+    }
     
     /* Unmap buffer */
     if (ctx->map && ctx->map != MAP_FAILED) {
@@ -597,15 +673,23 @@ static void save_crtc_state(xbs_drm_ctx_t *ctx) {
     FILE *f = fopen(CRTC_STATE_FILE, "w");
     if (!f) return;
     
-    fprintf(f, "%u %u %u %u %u %d ", 
+    /* Write CRTC fields as text for robustness across libdrm versions */
+    fprintf(f, "%u %u %u %u %u %d\n",
             ctx->saved_crtc->crtc_id,
             ctx->saved_crtc->buffer_id,
             ctx->saved_crtc->x,
             ctx->saved_crtc->y,
             ctx->conn_id,
             ctx->card_idx);
-    /* Write mode info */
-    fwrite(&ctx->saved_crtc->mode, sizeof(drmModeModeInfo), 1, f);
+    
+    /* Write mode info as text (not binary) to survive libdrm struct changes */
+    drmModeModeInfo *m = &ctx->saved_crtc->mode;
+    fprintf(f, "%u %u %u %u %u %u %u %u %u %u %u %u %u %u\n",
+            m->clock, m->hdisplay, m->hsync_start, m->hsync_end, m->htotal,
+            m->hskew, m->vdisplay, m->vsync_start, m->vsync_end, m->vtotal,
+            m->vscan, m->vrefresh, m->flags, m->type);
+    /* Write name on separate line to handle spaces and empty strings */
+    fprintf(f, "%s\n", m->name ? m->name : "");
     fclose(f);
 }
 
@@ -616,17 +700,32 @@ static int restore_crtc_from_file(void) {
     
     uint32_t crtc_id, buffer_id, x, y, conn_id;
     int card_idx;
-    drmModeModeInfo mode;
     
-    if (fscanf(f, "%u %u %u %u %u %d ", &crtc_id, &buffer_id, &x, &y, &conn_id, &card_idx) != 6) {
+    if (fscanf(f, "%u %u %u %u %u %d\n", &crtc_id, &buffer_id, &x, &y, &conn_id, &card_idx) != 6) {
         fclose(f);
         return -1;
     }
     
-    if (fread(&mode, sizeof(drmModeModeInfo), 1, f) != 1) {
+    /* Read mode info as text (matches save_crtc_state format) */
+    drmModeModeInfo mode = {0};
+    if (fscanf(f, "%u %u %u %u %u %u %u %u %u %u %u %u %u %u\n",
+               &mode.clock, &mode.hdisplay, &mode.hsync_start, &mode.hsync_end, &mode.htotal,
+               &mode.hskew, &mode.vdisplay, &mode.vsync_start, &mode.vsync_end, &mode.vtotal,
+               &mode.vscan, &mode.vrefresh, &mode.flags, &mode.type) != 14) {
         fclose(f);
         return -1;
     }
+    /* Read name on separate line (handles spaces and empty strings) */
+    if (!fgets(mode.name, sizeof(mode.name), f)) {
+        mode.name[0] = '\0';
+    } else {
+        /* Strip trailing newline if present */
+        size_t len = strlen(mode.name);
+        if (len > 0 && mode.name[len - 1] == '\n') {
+            mode.name[len - 1] = '\0';
+        }
+    }
+    
     fclose(f);
     
     /* Open the SAME DRM device that was used during splash */
@@ -729,18 +828,23 @@ static void blit_rgb565_to_xrgb8888_sse2(uint32_t *dst, const uint16_t *src, int
 
 /* Blit RGB565 frame to XRGB8888 DRM framebuffer */
 static void blit_to_drm(uint8_t *fb, int fb_w, int fb_h, int fb_pitch,
-                        const uint16_t *frame, int fw, int fh, int x, int y) {
-    /* Clip to framebuffer bounds */
-    if (x < 0) { fw += x; frame -= x; x = 0; }
-    if (y < 0) { fh += y; frame -= y * FRAME_W; y = 0; }
+                        const uint16_t *frame, int src_stride,
+                        int fw, int fh, int x, int y) {
+    /* Clip to framebuffer bounds - compute dimensions first */
+    int src_x = 0, src_y = 0;  /* Source offsets for clipping */
+    if (x < 0) { src_x = -x; fw += x; x = 0; }
+    if (y < 0) { src_y = -y; fh += y; y = 0; }
     if (x + fw > fb_w) fw = fb_w - x;
     if (y + fh > fb_h) fh = fb_h - y;
     if (fw <= 0 || fh <= 0) return;
     
+    /* Now safe to compute source pointer - guaranteed within bounds */
+    frame += src_y * src_stride + src_x;
+    
     /* Convert RGB565 to XRGB8888 with SSE2 - row by row */
     for (int row = 0; row < fh; row++) {
         uint32_t *dst = (uint32_t *)(fb + (y + row) * fb_pitch + x * 4);
-        const uint16_t *src = frame + row * FRAME_W;
+        const uint16_t *src = frame + row * src_stride;
         blit_rgb565_to_xrgb8888_sse2(dst, src, fw);
     }
 }
@@ -856,7 +960,14 @@ int main(int argc, char **argv) {
     /* Setup signal handlers */
     signal(SIGTERM, signal_handler);
     signal(SIGINT, signal_handler);
-    
+    signal(SIGALRM, signal_handler);
+
+    if (getenv("SHUTDOWN_MODE")) {
+        alarm(5);
+    } else {
+        alarm(MAX_BOOT_TIMEOUT_SEC);
+    }
+
     /* Initialize DRM */
     ret = drm_init(&drm_ctx);
     if (ret < 0) {
@@ -913,8 +1024,17 @@ int main(int argc, char **argv) {
 #elif DISPLAY_MODE == 1 || DISPLAY_MODE == 2
     x = (drm_ctx.width - FRAME_W) / 2 + HORIZONTAL_OFFSET;
     y = (drm_ctx.height - FRAME_H) / 2 + VERTICAL_OFFSET;
+    /* Clear to background color first (background image may not cover the full screen) */
+    fill_fb_color(drm_ctx.map, drm_ctx.width, drm_ctx.height, drm_ctx.pitch, BACKGROUND_COLOR);
+#if DISPLAY_MODE == 1
+    int bg_x = ((int)drm_ctx.width - BG_W) / 2 + BG_OFFSET_X;
+    int bg_y = ((int)drm_ctx.height - BG_H) / 2 + BG_OFFSET_Y;
     blit_to_drm(drm_ctx.map, drm_ctx.width, drm_ctx.height, drm_ctx.pitch,
-                bg_buffer, BG_W, BG_H, 0, 0);
+                bg_buffer, BG_W, BG_W, BG_H, bg_x, bg_y);
+#else
+    blit_to_drm(drm_ctx.map, drm_ctx.width, drm_ctx.height, drm_ctx.pitch,
+                bg_buffer, BG_W, BG_W, BG_H, 0, 0);
+#endif
 #else
     x = (drm_ctx.width - FRAME_W) / 2 + HORIZONTAL_OFFSET;
     y = (drm_ctx.height - FRAME_H) / 2 + VERTICAL_OFFSET;
@@ -925,7 +1045,7 @@ int main(int argc, char **argv) {
 #if DISPLAY_MODE == 3 || DISPLAY_MODE == 4
     /* Static image */
     blit_to_drm(drm_ctx.map, drm_ctx.width, drm_ctx.height, drm_ctx.pitch,
-                frame_buffer, FRAME_W, FRAME_H, x, y);
+                frame_buffer, FRAME_W, FRAME_W, FRAME_H, x, y);
     
     while (!terminate_requested) {
         sleep_ms(1000);
@@ -942,7 +1062,7 @@ int main(int argc, char **argv) {
         
         /* Blit current frame */
         blit_to_drm(drm_ctx.map, drm_ctx.width, drm_ctx.height, drm_ctx.pitch,
-                    frame_buffer, FRAME_W, FRAME_H, x, y);
+                    frame_buffer, FRAME_W, FRAME_W, FRAME_H, x, y);
         
         /* Mark framebuffer as dirty to trigger refresh - lighter than drmModeSetCrtc */
         struct drm_clip_rect clip = {

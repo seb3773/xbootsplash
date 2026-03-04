@@ -73,6 +73,78 @@ Tested/compatible with:
 - **SSE2 Optimized**: Fast RGB565→RGB8888 conversion for 32bpp framebuffers
 - **Graceful Shutdown**: SIGTERM/SIGINT handler for clean exit
 - **Custom Binary Names**: Install multiple splash screens with unique names (xbs_*)
+- **Package System**: Export and install distributable .xbs theme packages
+
+## Package System (.xbs)
+
+xbootsplash supports a simple package format for distributing themes. A `.xbs` file is a tar.gz archive containing a pre-built splash binary ready for installation.
+
+### Package Format
+
+```
+theme_drm_1920x1080.xbs
+├── splash_bin        # Pre-compiled binary
+├── metadata.conf     # Theme information (Bash-parseable)
+└── preview.gif       # Preview image
+```
+
+### Creating a Package
+
+After building your splash, the script automatically offers to export it:
+
+```bash
+./build_anim.sh
+# Follow the interactive prompts
+# At the end, choose "Export as .xbs package"
+```
+
+Or manually after a successful build:
+```bash
+# The package is created in packages/ directory
+ls packages/
+# Output: mytheme_drm_1920x1080.xbs
+```
+
+### Installing a Package
+
+Install a downloaded `.xbs` package without needing gcc, ImageMagick, or source files:
+
+```bash
+sudo ./build_anim.sh --install-package theme_drm_1920x1080.xbs
+```
+
+The installer will:
+1. Extract and verify the package
+2. Check SHA256 integrity
+3. Verify backend compatibility (drm/fbdev)
+4. Prompt for installation type (boot/shutdown/both)
+
+### Package Metadata
+
+The `metadata.conf` file contains theme information:
+
+```ini
+# XBootsplash Package Metadata
+XBS_PKG_VERSION="1.0"
+SPLASH_NAME="mytheme"
+BACKEND="drm"
+RESOLUTION="1920x1080"
+DISPLAY_MODE="0"
+BG_COLOR="0x0000"
+FRAME_W="600"
+FRAME_H="338"
+NFRAMES="60"
+FPS="30"
+BINARY_SHA256="e3b0c44298fc1c149afbf4c8996fb924..."
+```
+
+### Naming Convention
+
+Packages follow the format: `<name>_<backend>_<resolution>.xbs`
+
+Examples:
+- `win11_drm_1920x1080.xbs` - Windows 11 style, DRM backend, 1080p
+- `tux_fbdev_800x600.xbs` - Tux logo, fbdev backend, 600p
 
 ## Display Modes
 

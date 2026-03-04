@@ -117,8 +117,8 @@ sudo ./build_anim.sh --uninstall-only
 ```
 
 This removes:
-- `/sbin/xbootsplash`
-- `/etc/initramfs-tools/hooks/xbootsplash`
-- `/etc/initramfs-tools/scripts/init-top/xbootsplash`
-- `/etc/initramfs-tools/scripts/init-bottom/xbootsplash`
+- `/sbin/xbs_*` (all installed splash binaries)
+- `/etc/initramfs-tools/hooks/xbs_*`
+- `/etc/initramfs-tools/scripts/init-top/xbs_*`
+- `/etc/initramfs-tools/scripts/init-bottom/xbs_*`
 - Rebuilds initramfs automatically

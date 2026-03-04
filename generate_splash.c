@@ -26,23 +26,28 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdint.h>
 #include <string.h>
+#include <stdint.h>
 #include <unistd.h>
-#include <sys/wait.h>
-#include <fcntl.h>
+#include <errno.h>
 #include <dirent.h>
-#include <png.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 #include <ctype.h>
 #include <math.h>
+#include <png.h>
+#include <fcntl.h>
 
 /* Configuration */
 static int display_mode = 0;
 static int offset_x = 0;
 static int offset_y = 0;
+static int bg_offset_x = 0;
+static int bg_offset_y = 0;
 static int frame_delay_ms = 33;
 static int loop_mode = 1;      /* 0=no loop, 1=full loop, 2=partial loop */
 static int loop_start = 0;     /* Start frame for partial loop */
@@ -214,19 +219,18 @@ static int exec_cmd(const char *prog, char *const argv[]) {
     if (pid < 0) return -1;
     
     if (pid == 0) {
-        /* Child: redirect stderr to /dev/null */
-        int devnull = open("/dev/null", O_WRONLY);
-        if (devnull >= 0) {
-            dup2(devnull, STDERR_FILENO);
-            close(devnull);
-        }
         execvp(prog, argv);
         _exit(127);
     }
     
     /* Parent: wait for child */
-    int status;
-    waitpid(pid, &status, 0);
+    int status = 0;
+    for (;;) {
+        pid_t w = waitpid(pid, &status, 0);
+        if (w == pid) break;
+        if (w < 0 && errno == EINTR) continue;
+        return -1;
+    }
     return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
 
@@ -321,13 +325,33 @@ static int load_png(const char *path, image_t *img) {
     }
     
     FILE *fp = fopen(load_path, "rb");
-    if (!fp) return -1;
+    if (!fp) {
+        fprintf(stderr, "Error: Cannot open PNG: %s (%s)\n", load_path, strerror(errno));
+        if (flattened_path) unlink(flattened_path);
+        return -1;
+    }
     
     png_structp png = png_create_read_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+    if (!png) {
+        fprintf(stderr, "Error: libpng init failed for: %s\n", load_path);
+        fclose(fp);
+        if (flattened_path) unlink(flattened_path);
+        return -1;
+    }
     png_infop info = png_create_info_struct(png);
+    if (!info) {
+        fprintf(stderr, "Error: libpng info init failed for: %s\n", load_path);
+        png_destroy_read_struct(&png, NULL, NULL);
+        fclose(fp);
+        if (flattened_path) unlink(flattened_path);
+        return -1;
+    }
     
     if (setjmp(png_jmpbuf(png))) {
+        fprintf(stderr, "Error: libpng read failed for: %s\n", load_path);
+        png_destroy_read_struct(&png, &info, NULL);
         fclose(fp);
+        if (flattened_path) unlink(flattened_path);
         return -1;
     }
     
@@ -375,10 +399,7 @@ static int load_png(const char *path, image_t *img) {
     fclose(fp);
     png_destroy_read_struct(&png, &info, NULL);
     
-    /* Clean up flattened temp file if created */
-    if (flattened_path) {
-        unlink(flattened_path);
-    }
+    if (flattened_path) unlink(flattened_path);
     
     return 0;
 }
@@ -614,6 +635,7 @@ static size_t compress_raw_direct(const uint16_t *pixels, int count, uint8_t *ou
 /* Build palette from image, return number of unique colors (max 256) */
 static int build_palette(const uint16_t *pixels, int count, uint16_t *palette, uint8_t *indices) {
     int num_colors = 0;
+    int overflow = 0;
     
     /* Simple linear search - good enough for 256 colors */
     for (int i = 0; i < count; i++) {
@@ -635,10 +657,14 @@ static int build_palette(const uint16_t *pixels, int count, uint16_t *palette, u
             indices[i] = (uint8_t)num_colors;
             num_colors++;
         } else {
-            /* Palette full - should not happen if image was quantized */
-            /* Use closest color (simple: just use last) */
+            /* Palette full: refuse silently producing wrong output. */
+            overflow = 1;
             indices[i] = 255;
         }
+    }
+
+    if (overflow) {
+        return -1;
     }
     
     return num_colors;
@@ -650,7 +676,7 @@ static int build_palette(const uint16_t *pixels, int count, uint16_t *palette, u
 #define LZSS_MAX_MATCH  18
 
 /* LZSS compress byte array (indices) */
-static size_t compress_lzss(const uint8_t *data, int count, uint8_t *out) {
+static size_t compress_lzss(const uint8_t *data, int count, uint8_t *out, size_t out_size) {
     size_t out_pos = 0;
     int in_pos = 0;
     uint8_t window[LZSS_WINDOW_SIZE];
@@ -721,6 +747,11 @@ static size_t compress_lzss(const uint8_t *data, int count, uint8_t *out) {
         
         /* Flush when we have 8 bits */
         if (bit_pos == 8) {
+            /* Bounds check: flag byte + items */
+            if (out_pos + 1 + item_count > out_size) {
+                fprintf(stderr, "LZSS overflow: output buffer too small\n");
+                return 0;  /* Return 0 to indicate failure */
+            }
             out[out_pos++] = flag_byte;
             for (int i = 0; i < item_count; i++) {
                 out[out_pos++] = items[i];
@@ -733,6 +764,11 @@ static size_t compress_lzss(const uint8_t *data, int count, uint8_t *out) {
     
     /* Flush remaining */
     if (bit_pos > 0) {
+        /* Bounds check */
+        if (out_pos + 1 + item_count > out_size) {
+            fprintf(stderr, "LZSS overflow: output buffer too small\n");
+            return 0;
+        }
         out[out_pos++] = flag_byte;
         for (int i = 0; i < item_count; i++) {
             out[out_pos++] = items[i];
@@ -827,6 +863,8 @@ static void print_help(const char *prog) {
     fprintf(stderr, "  -m <mode>      Display mode (0-4)\n");
     fprintf(stderr, "  -x <offset>    Horizontal offset (default: 0)\n");
     fprintf(stderr, "  -y <offset>    Vertical offset (default: 0)\n");
+    fprintf(stderr, "  -X <offset>    Background horizontal offset for mode 1 (default: 0)\n");
+    fprintf(stderr, "  -Y <offset>    Background vertical offset for mode 1 (default: 0)\n");
     fprintf(stderr, "  -d <delay>     Frame delay in ms (default: 33)\n");
     fprintf(stderr, "  -l <mode>      Loop mode: 0=no loop, 1=full loop (default), 2=partial loop\n");
     fprintf(stderr, "  -L <frame>     Loop start frame for partial loop mode (default: 0)\n");
@@ -854,6 +892,12 @@ int main(int argc, char *argv[]) {
             arg_idx++;
         } else if (strcmp(argv[arg_idx], "-y") == 0 && arg_idx + 1 < argc) {
             offset_y = atoi(argv[++arg_idx]);
+            arg_idx++;
+        } else if (strcmp(argv[arg_idx], "-X") == 0 && arg_idx + 1 < argc) {
+            bg_offset_x = atoi(argv[++arg_idx]);
+            arg_idx++;
+        } else if (strcmp(argv[arg_idx], "-Y") == 0 && arg_idx + 1 < argc) {
+            bg_offset_y = atoi(argv[++arg_idx]);
             arg_idx++;
         } else if (strcmp(argv[arg_idx], "-d") == 0 && arg_idx + 1 < argc) {
             frame_delay_ms = atoi(argv[++arg_idx]);
@@ -926,6 +970,8 @@ int main(int argc, char *argv[]) {
     printf("#define DISPLAY_MODE %d\n", display_mode);
     printf("#define HORIZONTAL_OFFSET %d\n", offset_x);
     printf("#define VERTICAL_OFFSET %d\n", offset_y);
+    printf("#define BG_OFFSET_X %d\n", bg_offset_x);
+    printf("#define BG_OFFSET_Y %d\n", bg_offset_y);
     printf("#define BACKGROUND_COLOR 0x%04X\n", 
            rgb_to_rgb565((bg_color >> 16) & 0xFF, (bg_color >> 8) & 0xFF, bg_color & 0xFF));
     
@@ -1007,10 +1053,26 @@ int main(int argc, char *argv[]) {
         
         /* Build palette from image */
         int num_colors = build_palette(img.pixels, pixel_count, palette, indices);
+        if (num_colors < 0) {
+            fprintf(stderr, "Error: Image has more than 256 unique colors. Please quantize it to 256 colors (or less).\n");
+            free(palette);
+            free(indices);
+            free(compressed);
+            free(img.pixels);
+            return 1;
+        }
         fprintf(stderr, "Palette: %d unique colors\n", num_colors);
         
         /* Compress indices with LZSS */
-        size_t comp_size = compress_lzss(indices, pixel_count, compressed);
+        size_t comp_size = compress_lzss(indices, pixel_count, compressed, pixel_count * 2);
+        if (comp_size == 0) {
+            fprintf(stderr, "Error: LZSS compression failed\n");
+            free(palette);
+            free(indices);
+            free(compressed);
+            free(img.pixels);
+            return 1;
+        }
         fprintf(stderr, "LZSS compressed: %zu bytes (%.1f%% of raw)\n", 
                 comp_size, 100.0 * comp_size / (pixel_count * 2));
         
@@ -1171,58 +1233,95 @@ int main(int argc, char *argv[]) {
             int best_method = COMPRESS_RLE_XOR;
             const char *method_names[] = {"RLE_XOR", "SPARSE", "RLE_DIRECT"};
             int method_ids[] = {COMPRESS_RLE_XOR, COMPRESS_SPARSE, COMPRESS_RLE_DIRECT};
-            
-            /* Allocate temporary buffers for testing */
-            uint8_t *test_buf = malloc(pixels * 6);
-            uint8_t *frame0_buf = malloc(pixels * 3);
+
+            uint8_t *frame0_buf = malloc((size_t)pixels * 2);
             size_t frame0_size = compress_raw_direct(frame_imgs[0].pixels, pixels, frame0_buf);
-            
+
+            uint8_t **best_comp = NULL;
+            size_t *best_sizes = NULL;
+
             for (int m = 0; m < 3; m++) {
                 size_t total = frame0_size;
-                int method_valid = 1;  /* Track if method is valid for this animation */
-                const size_t test_buf_size = (size_t)pixels * 6;
-                
+                int method_valid = 1;
+
+                uint8_t **method_comp = calloc((size_t)nframes, sizeof(uint8_t *));
+                size_t *method_sizes = calloc((size_t)nframes, sizeof(size_t));
+
                 for (int f = 1; f < nframes; f++) {
-                    size_t size = 0;  /* Initialize to prevent undefined behavior */
-                    switch (method_ids[m]) {
-                        case COMPRESS_RLE_XOR:
-                            size = compress_rle_xor(frame_imgs[f].pixels, frame_imgs[f-1].pixels, pixels, test_buf, test_buf_size);
-                            break;
-                        case COMPRESS_SPARSE:
-                            size = compress_sparse_xor(frame_imgs[f].pixels, frame_imgs[f-1].pixels, pixels, test_buf, test_buf_size);
-                            break;
-                        case COMPRESS_RLE_DIRECT:
-                            size = compress_rle_direct(frame_imgs[f].pixels, pixels, test_buf, test_buf_size);
-                            break;
-                        default:
-                            size = 0;  /* Should never happen */
-                            break;
+                    size_t out_cap = 0;
+                    if (method_ids[m] == COMPRESS_RLE_XOR || method_ids[m] == COMPRESS_RLE_DIRECT) {
+                        out_cap = (size_t)pixels * 3 + 1;
+                    } else {
+                        size_t changed = 0;
+                        const uint16_t *c = frame_imgs[f].pixels;
+                        const uint16_t *p = frame_imgs[f - 1].pixels;
+                        for (int i = 0; i < pixels; i++) changed += (c[i] != p[i]);
+                        out_cap = 4 + changed * 6;
                     }
-                    /* If size is 0 (overflow/error), mark method as invalid */
-                    if (size == 0 && f > 0) {
+
+                    method_comp[f] = malloc(out_cap);
+                    if (!method_comp[f]) {
                         method_valid = 0;
-                        total = SIZE_MAX;  /* Ensure this method won't be selected */
+                        total = SIZE_MAX;
                         break;
                     }
+
+                    size_t size = 0;
+                    switch (method_ids[m]) {
+                        case COMPRESS_RLE_XOR:
+                            size = compress_rle_xor(frame_imgs[f].pixels, frame_imgs[f - 1].pixels,
+                                                    pixels, method_comp[f], out_cap);
+                            break;
+                        case COMPRESS_SPARSE:
+                            size = compress_sparse_xor(frame_imgs[f].pixels, frame_imgs[f - 1].pixels,
+                                                       pixels, method_comp[f], out_cap);
+                            break;
+                        case COMPRESS_RLE_DIRECT:
+                            size = compress_rle_direct(frame_imgs[f].pixels, pixels, method_comp[f], out_cap);
+                            break;
+                        default:
+                            size = 0;
+                            break;
+                    }
+
+                    if (size == 0) {
+                        method_valid = 0;
+                        total = SIZE_MAX;
+                        break;
+                    }
+
+                    method_sizes[f] = size;
                     total += size;
                 }
-                
+
                 if (!method_valid) {
-                    fprintf(stderr, "  %d/3: method %-12s ...... SKIPPED (frame too large for 16-bit indices)\n", 
+                    fprintf(stderr, "  %d/3: method %-12s ...... SKIPPED (compression failed)\n",
                             m + 1, method_names[m]);
                 } else {
-                    fprintf(stderr, "  %d/3: method %-12s ...... %zu bytes (%.1f KB)\n", 
+                    fprintf(stderr, "  %d/3: method %-12s ...... %zu bytes (%.1f KB)\n",
                             m + 1, method_names[m], total, total / 1024.0);
                 }
-                
+
                 if (total < best_size) {
+                    if (best_comp) {
+                        for (int f = 1; f < nframes; f++) free(best_comp[f]);
+                        free(best_comp);
+                        free(best_sizes);
+                    }
                     best_size = total;
                     best_method = method_ids[m];
+                    best_comp = method_comp;
+                    best_sizes = method_sizes;
+                    method_comp = NULL;
+                    method_sizes = NULL;
                 }
+
+                if (method_comp) {
+                    for (int f = 1; f < nframes; f++) free(method_comp[f]);
+                    free(method_comp);
+                }
+                free(method_sizes);
             }
-            
-            free(test_buf);
-            free(frame0_buf);
             
             fprintf(stderr, "\n  ---> Best method: %s (%zu bytes)\n\n", 
                     method_names[best_method == COMPRESS_RLE_XOR ? 0 : 
@@ -1233,6 +1332,57 @@ int main(int argc, char *argv[]) {
                    compress_method, 
                    method_names[compress_method == COMPRESS_RLE_XOR ? 0 : 
                                 compress_method == COMPRESS_SPARSE ? 1 : 2]);
+
+            /* Compress frames with selected method (reuse best buffers from auto-test) */
+            uint8_t **compressed = malloc(sizeof(uint8_t*) * nframes);
+            size_t *comp_sizes = malloc(sizeof(size_t) * nframes);
+            size_t total_size = 0;
+
+            compressed[0] = frame0_buf;
+            comp_sizes[0] = frame0_size;
+            total_size += comp_sizes[0];
+            output_frame_data(0, compressed[0], comp_sizes[0]);
+
+            for (int f = 1; f < nframes; f++) {
+                compressed[f] = best_comp ? best_comp[f] : NULL;
+                comp_sizes[f] = best_sizes ? best_sizes[f] : 0;
+                total_size += comp_sizes[f];
+                output_frame_data(f, compressed[f], comp_sizes[f]);
+            }
+
+            /* Frame array */
+            printf("static const uint8_t* const frames[NFRAMES] = {\n");
+            for (int f = 0; f < nframes; f++) {
+                printf("    frame_%d,\n", f);
+            }
+            printf("};\n\n");
+
+            printf("static const uint32_t frame_sizes[NFRAMES] = {\n");
+            for (int f = 0; f < nframes; f++) {
+                printf("    %zu,\n", comp_sizes[f]);
+            }
+            printf("};\n");
+
+            fprintf(stderr, "Total compressed: %zu bytes (%.1f KB)\n", total_size, total_size / 1024.0);
+
+            for (int i = 0; i < nframes; i++) {
+                free(frame_imgs[i].pixels);
+                free(compressed[i]);
+                free(frames[i].path);
+                free(frames[i].tmp_path);
+            }
+            free(frame_imgs);
+            free(frames);
+            free(compressed);
+            free(comp_sizes);
+
+            free(best_comp);
+            free(best_sizes);
+
+            /* Cleanup temp directory */
+            char *rm_argv[] = {(char *)"rm", (char *)"-rf", (char *)tmpdir, NULL};
+            exec_cmd("rm", rm_argv);
+            return 0;
         } else {
             printf("#define COMPRESS_METHOD %d  /* 0=RLE_XOR, 1=RLE_DIRECT, 2=SPARSE, 3=RAW */\n", compress_method);
         }
@@ -1251,7 +1401,16 @@ int main(int argc, char *argv[]) {
         
         /* Delta frames */
         for (int f = 1; f < nframes; f++) {
-            const size_t comp_buf_size = (size_t)pixels * 6;
+            size_t comp_buf_size;
+            if (compress_method == COMPRESS_RLE_XOR || compress_method == COMPRESS_RLE_DIRECT) {
+                comp_buf_size = (size_t)pixels * 3 + 1;
+            } else if (compress_method == COMPRESS_RAW) {
+                comp_buf_size = (size_t)pixels * 2;
+            } else if (compress_method == COMPRESS_SPARSE) {
+                comp_buf_size = (size_t)pixels * 6 + 4;
+            } else {
+                comp_buf_size = (size_t)pixels * 3 + 1;
+            }
             compressed[f] = malloc(comp_buf_size);
             switch (compress_method) {
                 case COMPRESS_RLE_XOR:
@@ -1306,7 +1465,7 @@ int main(int argc, char *argv[]) {
         free(comp_sizes);
         
         /* Cleanup temp directory */
-        char *rm_argv[] = {(char *)"rm", (char *)"-rf", tmpdir, NULL};
+        char *rm_argv[] = {(char *)"rm", (char *)"-rf", (char *)tmpdir, NULL};
         exec_cmd("rm", rm_argv);
         
     } else if (display_mode == MODE_ANIM_IMAGE_CENTER || display_mode == MODE_ANIM_IMAGE_FULL) {
@@ -1318,9 +1477,10 @@ int main(int argc, char *argv[]) {
         
         /* Convert background to standard PNG first to handle JPEG and other formats */
         char bg_tmp_path[512];
-        snprintf(bg_tmp_path, sizeof(bg_tmp_path), "/tmp/splash_bg_%d.png", getpid());
+        const char *tmpdir = get_secure_tmpdir();
+        snprintf(bg_tmp_path, sizeof(bg_tmp_path), "%s/splash_bg.png", tmpdir);
         
-        char png24_arg[32];
+        char png24_arg[512];
         snprintf(png24_arg, sizeof(png24_arg), "PNG24:%s", bg_tmp_path);
         
         char *bg_argv[] = {
@@ -1334,6 +1494,12 @@ int main(int argc, char *argv[]) {
         
         if (exec_cmd("convert", bg_argv) != 0) {
             fprintf(stderr, "Error: Failed to convert background image: %s\n", bg_image_path);
+            return 1;
+        }
+
+        if (access(bg_tmp_path, R_OK) != 0) {
+            fprintf(stderr, "Error: Background conversion produced no output: %s (%s)\n",
+                    bg_tmp_path, strerror(errno));
             return 1;
         }
 
@@ -1367,9 +1533,7 @@ int main(int argc, char *argv[]) {
         frame_entry_t *frames = NULL;
         int nframes = 0;
         struct dirent *ent;
-        char tmpdir[256];
-        snprintf(tmpdir, sizeof(tmpdir), "/tmp/splash_frames_%d", getpid());
-        mkdir(tmpdir, 0755);
+        tmpdir = get_secure_tmpdir();
         
         /* First pass: count frames */
         int frame_count = 0;
@@ -1516,9 +1680,25 @@ int main(int argc, char *argv[]) {
         uint8_t *bg_compressed = malloc(bg_pixel_count * 2);
         
         int bg_num_colors = build_palette(bg.pixels, bg_pixel_count, bg_palette, bg_indices);
+        if (bg_num_colors < 0) {
+            fprintf(stderr, "Error: Background has more than 256 unique colors. Please quantize it to 256 colors (or less).\n");
+            free(bg_palette);
+            free(bg_indices);
+            free(bg_compressed);
+            free(bg.pixels);
+            return 1;
+        }
         fprintf(stderr, "Background palette: %d unique colors\n", bg_num_colors);
         
-        size_t bg_comp_size = compress_lzss(bg_indices, bg_pixel_count, bg_compressed);
+        size_t bg_comp_size = compress_lzss(bg_indices, bg_pixel_count, bg_compressed, bg_pixel_count * 2);
+        if (bg_comp_size == 0) {
+            fprintf(stderr, "Error: Background LZSS compression failed\n");
+            free(bg_palette);
+            free(bg_indices);
+            free(bg_compressed);
+            free(bg.pixels);
+            return 1;
+        }
         fprintf(stderr, "Background LZSS: %zu bytes (%.1f%% of raw)\n", 
                 bg_comp_size, 100.0 * bg_comp_size / (bg_pixel_count * 2));
         
@@ -1540,57 +1720,95 @@ int main(int argc, char *argv[]) {
             int best_method = COMPRESS_RLE_XOR;
             const char *method_names[] = {"RLE_XOR", "SPARSE", "RLE_DIRECT"};
             int method_ids[] = {COMPRESS_RLE_XOR, COMPRESS_SPARSE, COMPRESS_RLE_DIRECT};
-            
-            uint8_t *test_buf = malloc(pixels * 6);
-            uint8_t *frame0_buf = malloc(pixels * 3);
+
+            uint8_t *frame0_buf = malloc((size_t)pixels * 2);
             size_t frame0_size = compress_raw_direct(frame_imgs[0].pixels, pixels, frame0_buf);
-            
+
+            uint8_t **best_comp = NULL;
+            size_t *best_sizes = NULL;
+
             for (int m = 0; m < 3; m++) {
                 size_t total = frame0_size;
-                int method_valid = 1;  /* Track if method is valid for this animation */
-                const size_t test_buf_size = (size_t)pixels * 6;
-                
+                int method_valid = 1;
+
+                uint8_t **method_comp = calloc((size_t)nframes, sizeof(uint8_t *));
+                size_t *method_sizes = calloc((size_t)nframes, sizeof(size_t));
+
                 for (int f = 1; f < nframes; f++) {
-                    size_t size = 0;  /* Initialize to prevent undefined behavior */
-                    switch (method_ids[m]) {
-                        case COMPRESS_RLE_XOR:
-                            size = compress_rle_xor(frame_imgs[f].pixels, frame_imgs[f-1].pixels, pixels, test_buf, test_buf_size);
-                            break;
-                        case COMPRESS_SPARSE:
-                            size = compress_sparse_xor(frame_imgs[f].pixels, frame_imgs[f-1].pixels, pixels, test_buf, test_buf_size);
-                            break;
-                        case COMPRESS_RLE_DIRECT:
-                            size = compress_rle_direct(frame_imgs[f].pixels, pixels, test_buf, test_buf_size);
-                            break;
-                        default:
-                            size = 0;  /* Should never happen */
-                            break;
+                    size_t out_cap = 0;
+                    if (method_ids[m] == COMPRESS_RLE_XOR || method_ids[m] == COMPRESS_RLE_DIRECT) {
+                        out_cap = (size_t)pixels * 3 + 1;
+                    } else {
+                        size_t changed = 0;
+                        const uint16_t *c = frame_imgs[f].pixels;
+                        const uint16_t *p = frame_imgs[f - 1].pixels;
+                        for (int i = 0; i < pixels; i++) changed += (c[i] != p[i]);
+                        out_cap = 4 + changed * 6;
                     }
-                    /* If size is 0 (overflow/error), mark method as invalid */
-                    if (size == 0 && f > 0) {
+
+                    method_comp[f] = malloc(out_cap);
+                    if (!method_comp[f]) {
                         method_valid = 0;
-                        total = SIZE_MAX;  /* Ensure this method won't be selected */
+                        total = SIZE_MAX;
                         break;
                     }
+
+                    size_t size = 0;
+                    switch (method_ids[m]) {
+                        case COMPRESS_RLE_XOR:
+                            size = compress_rle_xor(frame_imgs[f].pixels, frame_imgs[f - 1].pixels,
+                                                    pixels, method_comp[f], out_cap);
+                            break;
+                        case COMPRESS_SPARSE:
+                            size = compress_sparse_xor(frame_imgs[f].pixels, frame_imgs[f - 1].pixels,
+                                                       pixels, method_comp[f], out_cap);
+                            break;
+                        case COMPRESS_RLE_DIRECT:
+                            size = compress_rle_direct(frame_imgs[f].pixels, pixels, method_comp[f], out_cap);
+                            break;
+                        default:
+                            size = 0;
+                            break;
+                    }
+
+                    if (size == 0) {
+                        method_valid = 0;
+                        total = SIZE_MAX;
+                        break;
+                    }
+
+                    method_sizes[f] = size;
                     total += size;
                 }
-                
+
                 if (!method_valid) {
-                    fprintf(stderr, "  %d/3: method %-12s ...... SKIPPED (frame too large for 16-bit indices)\n", 
+                    fprintf(stderr, "  %d/3: method %-12s ...... SKIPPED (compression failed)\n",
                             m + 1, method_names[m]);
                 } else {
-                    fprintf(stderr, "  %d/3: method %-12s ...... %zu bytes (%.1f KB)\n", 
+                    fprintf(stderr, "  %d/3: method %-12s ...... %zu bytes (%.1f KB)\n",
                             m + 1, method_names[m], total, total / 1024.0);
                 }
-                
+
                 if (total < best_size) {
+                    if (best_comp) {
+                        for (int f = 1; f < nframes; f++) free(best_comp[f]);
+                        free(best_comp);
+                        free(best_sizes);
+                    }
                     best_size = total;
                     best_method = method_ids[m];
+                    best_comp = method_comp;
+                    best_sizes = method_sizes;
+                    method_comp = NULL;
+                    method_sizes = NULL;
                 }
+
+                if (method_comp) {
+                    for (int f = 1; f < nframes; f++) free(method_comp[f]);
+                    free(method_comp);
+                }
+                free(method_sizes);
             }
-            
-            free(test_buf);
-            free(frame0_buf);
             
             fprintf(stderr, "\n  ---> Best method: %s (%zu bytes)\n\n", 
                     method_names[best_method == COMPRESS_RLE_XOR ? 0 : 
@@ -1601,6 +1819,54 @@ int main(int argc, char *argv[]) {
                    compress_method, 
                    method_names[compress_method == COMPRESS_RLE_XOR ? 0 : 
                                 compress_method == COMPRESS_SPARSE ? 1 : 2]);
+
+            uint8_t **compressed = malloc(sizeof(uint8_t*) * nframes);
+            size_t *comp_sizes = malloc(sizeof(size_t) * nframes);
+            size_t total_size = 0;
+
+            compressed[0] = frame0_buf;
+            comp_sizes[0] = frame0_size;
+            total_size += comp_sizes[0];
+            output_frame_data(0, compressed[0], comp_sizes[0]);
+
+            for (int f = 1; f < nframes; f++) {
+                compressed[f] = best_comp ? best_comp[f] : NULL;
+                comp_sizes[f] = best_sizes ? best_sizes[f] : 0;
+                total_size += comp_sizes[f];
+                output_frame_data(f, compressed[f], comp_sizes[f]);
+            }
+
+            printf("static const uint8_t* const frames[NFRAMES] = {\n");
+            for (int f = 0; f < nframes; f++) {
+                printf("    frame_%d,\n", f);
+            }
+            printf("};\n\n");
+
+            printf("static const uint32_t frame_sizes[NFRAMES] = {\n");
+            for (int f = 0; f < nframes; f++) {
+                printf("    %zu,\n", comp_sizes[f]);
+            }
+            printf("};\n");
+
+            fprintf(stderr, "Total compressed: %zu bytes (%.1f KB)\n", total_size, total_size / 1024.0);
+
+            for (int i = 0; i < nframes; i++) {
+                free(frame_imgs[i].pixels);
+                free(compressed[i]);
+                free(frames[i].path);
+                free(frames[i].tmp_path);
+            }
+            free(frame_imgs);
+            free(frames);
+            free(compressed);
+            free(comp_sizes);
+
+            free(best_comp);
+            free(best_sizes);
+
+            char *rm_argv[] = {(char *)"rm", (char *)"-rf", (char *)tmpdir, NULL};
+            exec_cmd("rm", rm_argv);
+            return 0;
         } else {
             printf("#define COMPRESS_METHOD %d  /* 0=RLE_XOR, 1=RLE_DIRECT, 2=SPARSE, 3=RAW */\n", compress_method);
         }
@@ -1617,7 +1883,16 @@ int main(int argc, char *argv[]) {
         output_frame_data(0, compressed[0], comp_sizes[0]);
         
         for (int f = 1; f < nframes; f++) {
-            const size_t comp_buf_size = (size_t)pixels * 6;
+            size_t comp_buf_size;
+            if (compress_method == COMPRESS_RLE_XOR || compress_method == COMPRESS_RLE_DIRECT) {
+                comp_buf_size = (size_t)pixels * 3 + 1;
+            } else if (compress_method == COMPRESS_RAW) {
+                comp_buf_size = (size_t)pixels * 2;
+            } else if (compress_method == COMPRESS_SPARSE) {
+                comp_buf_size = (size_t)pixels * 6 + 4;
+            } else {
+                comp_buf_size = (size_t)pixels * 3 + 1;
+            }
             compressed[f] = malloc(comp_buf_size);
             switch (compress_method) {
                 case COMPRESS_RLE_XOR:
@@ -1671,7 +1946,7 @@ int main(int argc, char *argv[]) {
         free(comp_sizes);
         
         /* Cleanup temp directory */
-        char *rm_argv[] = {(char *)"rm", (char *)"-rf", tmpdir, NULL};
+        char *rm_argv[] = {(char *)"rm", (char *)"-rf", (char *)tmpdir, NULL};
         exec_cmd("rm", rm_argv);
     }
     

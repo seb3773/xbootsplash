@@ -27,7 +27,7 @@ _start:
      */
     movq (%rsp), %rax           /* argc */
     leaq 8(%rsp), %rcx          /* argv = rsp+8 */
-    leaq 8(%rsp, %rax, 8), %rax /* envp = rsp+8 + 8*(argc+1) = rsp+8*(argc+2) */
+    leaq 16(%rsp, %rax, 8), %rax /* envp = rsp+16 + 8*argc = rsp+8*(argc+2) */
     
     /* Store envp in environ global */
     movq %rax, environ(%rip)

@@ -28,45 +28,72 @@
 
 #include "nolibc.h"
 
-/* SSE2 intrinsics - inline asm implementation without system headers */
+#ifndef MAX_BOOT_TIMEOUT_SEC
+#define MAX_BOOT_TIMEOUT_SEC 180  /* 3 min - conservative for slow systems (RPi, RAID, fsck) */
+#endif
+
+/* SSE2 helpers for freestanding build (avoid system headers) */
 typedef long long __m128i __attribute__((__vector_size__(16), __aligned__(16)));
 typedef long long __m128i_u __attribute__((__vector_size__(16), __may_alias__, __aligned__(1)));
 
-#define _mm_set1_epi32(v)   __extension__({ \
-    int _v = (v); \
-    __m128i _r; \
-    __asm__("movd %1, %0; pshufd $0, %0, %0" : "=x"(_r) : "r"(_v)); \
-    _r; \
-})
-#define _mm_set1_epi16(v)   __extension__({ \
-    short _v = (short)(v); \
-    __m128i _r; \
-    __asm__("movd %1, %0; pshuflw $0, %0, %0; pshufhw $0, %0, %0" : "=x"(_r) : "r"(_v)); \
-    _r; \
-})
-#define _mm_setzero_si128() __extension__({ __m128i _r; __asm__("pxor %0, %0" : "=x"(_r)); _r; })
-#define _mm_loadu_si128(p)  (*(__m128i_u*)(p))
-#define _mm_storeu_si128(p, v) __extension__({ *(__m128i_u*)(p) = (v); })
-#define _mm_stream_si128(p, v) __asm__("movntdq %1, %0" : "=m"(*(__m128i*)(p)) : "x"(v) : "memory")
-#define _mm_sfence() __asm__ __volatile__("sfence" ::: "memory")
-#define _mm_unpacklo_epi16(a, b) __extension__({ \
-    __m128i _r; __asm__("punpcklwd %2, %1; movdqa %1, %0" : "=x"(_r) : "x"(a), "x"(b)); _r; \
-})
-#define _mm_unpackhi_epi16(a, b) __extension__({ \
-    __m128i _r; __asm__("punpckhwd %2, %1; movdqa %1, %0" : "=x"(_r) : "x"(a), "x"(b)); _r; \
-})
-#define _mm_and_si128(a, b) __extension__({ \
-    __m128i _r; __asm__("pand %2, %1; movdqa %1, %0" : "=x"(_r) : "x"(a), "x"(b)); _r; \
-})
-#define _mm_or_si128(a, b) __extension__({ \
-    __m128i _r; __asm__("por %2, %1; movdqa %1, %0" : "=x"(_r) : "x"(a), "x"(b)); _r; \
-})
-#define _mm_slli_epi32(a, imm) __extension__({ \
-    __m128i _r; __asm__("pslld %2, %1; movdqa %1, %0" : "=x"(_r) : "x"(a), "i"(imm)); _r; \
-})
-#define _mm_srli_epi32(a, imm) __extension__({ \
-    __m128i _r; __asm__("psrld %2, %1; movdqa %1, %0" : "=x"(_r) : "x"(a), "i"(imm)); _r; \
-})
+static __attribute__((always_inline)) inline __m128i _mm_set1_epi32(int v) {
+    __m128i r;
+    __asm__("movd %1, %0; pshufd $0, %0, %0" : "=x"(r) : "r"(v));
+    return r;
+}
+
+static __attribute__((always_inline)) inline __m128i _mm_set1_epi16(int v) {
+    __m128i r;
+    int vv = (short)v;
+    __asm__("movd %1, %0; pshuflw $0, %0, %0; pshufhw $0, %0, %0" : "=x"(r) : "r"(vv));
+    return r;
+}
+
+static __attribute__((always_inline)) inline __m128i _mm_setzero_si128(void) {
+    __m128i r;
+    __asm__("pxor %0, %0" : "=x"(r));
+    return r;
+}
+
+static __attribute__((always_inline)) inline __m128i _mm_loadu_si128(const void *p) {
+    __m128i r;
+    __asm__("movdqu %1, %0" : "=x"(r) : "m"(*(const __m128i_u *)p));
+    return r;
+}
+
+static __attribute__((always_inline)) inline void _mm_storeu_si128(void *p, __m128i v) {
+    __asm__("movdqu %1, %0" : "=m"(*(__m128i_u *)p) : "x"(v));
+}
+
+static __attribute__((always_inline)) inline __m128i _mm_unpacklo_epi16(__m128i a, __m128i b) {
+    __asm__("punpcklwd %1, %0" : "+x"(a) : "x"(b));
+    return a;
+}
+
+static __attribute__((always_inline)) inline __m128i _mm_unpackhi_epi16(__m128i a, __m128i b) {
+    __asm__("punpckhwd %1, %0" : "+x"(a) : "x"(b));
+    return a;
+}
+
+static __attribute__((always_inline)) inline __m128i _mm_and_si128(__m128i a, __m128i b) {
+    __asm__("pand %1, %0" : "+x"(a) : "x"(b));
+    return a;
+}
+
+static __attribute__((always_inline)) inline __m128i _mm_or_si128(__m128i a, __m128i b) {
+    __asm__("por %1, %0" : "+x"(a) : "x"(b));
+    return a;
+}
+
+static __attribute__((always_inline)) inline __m128i _mm_slli_epi32(__m128i a, const int imm) {
+    __asm__("pslld %1, %0" : "+x"(a) : "i"(imm));
+    return a;
+}
+
+static __attribute__((always_inline)) inline __m128i _mm_srli_epi32(__m128i a, const int imm) {
+    __asm__("psrld %1, %0" : "+x"(a) : "i"(imm));
+    return a;
+}
 
 /* Types for freestanding build */
 typedef unsigned int __u32;
@@ -83,6 +110,9 @@ static unsigned int fb_yres = 0;        /* Visible height */
 static unsigned int fb_line_len = 0;    /* Line length in bytes */
 static struct fb_var_screeninfo fb_vinfo; /* For pan display */
 
+static int bg_screen_x = 0;
+static int bg_screen_y = 0;
+
 /* Volatile flag for signal handling - POSIX requires sig_atomic_t for async-signal-safe access */
 static volatile sig_atomic_t terminate_requested = 0;
 
@@ -92,7 +122,23 @@ static void signal_handler(int sig) {
     terminate_requested = 1;
 }
 
+/* VSync timeout handler - used to interrupt blocking FBIO_WAITFORVSYNC */
+static void vsync_alarm_handler(int sig) {
+    (void)sig;  /* Dummy handler - exists solely to interrupt blocking ioctl with EINTR */
+}
+
+/* VSync skip flag - set if previous vsync attempt timed out (buggy driver) */
+static int vsync_skip = 0;
+
 #include "frames_delta.h"
+
+#ifndef BG_OFFSET_X
+#define BG_OFFSET_X 0
+#endif
+
+#ifndef BG_OFFSET_Y
+#define BG_OFFSET_Y 0
+#endif
 
 /* --- LZSS decompression for palette+LZSS compressed data --- */
 #if (defined(COMPRESS_METHOD) && COMPRESS_METHOD == 5) || (defined(DISPLAY_MODE) && (DISPLAY_MODE == 1 || DISPLAY_MODE == 2))
@@ -108,6 +154,7 @@ static void decompress_palette_lzss(const uint8_t *compressed, size_t comp_size,
     int window_pos = 0;
     int out_pos = 0;
     size_t in_pos = 0;
+    int bytes_written = 0;  /* Track bytes written to detect invalid back-refs */
     
     /* Initialize window */
     memset(window, 0, LZSS_WINDOW_SIZE);
@@ -122,7 +169,8 @@ static void decompress_palette_lzss(const uint8_t *compressed, size_t comp_size,
                 /* Literal byte */
                 uint8_t val = compressed[in_pos++];
                 window[window_pos] = val;
-                window_pos = (window_pos + 1) % LZSS_WINDOW_SIZE;
+                window_pos = (window_pos + 1) & (LZSS_WINDOW_SIZE - 1);
+                bytes_written++;
                 
                 /* Expand via palette */
                 out[out_pos++] = pal[val < num_colors ? val : 0];
@@ -135,12 +183,25 @@ static void decompress_palette_lzss(const uint8_t *compressed, size_t comp_size,
                 int offset = (b1 | ((b2 & 0xF0) << 4));
                 int length = (b2 & 0x0F) + LZSS_MIN_MATCH;
                 
+                /* Guard against invalid offset (corrupted data) */
+                if (offset == 0) offset = 1;
+                
+                /* Guard against back-reference before any literals (corrupted data) */
+                if (bytes_written == 0) {
+                    /* Invalid: back-ref with empty window - skip and continue */
+                    continue;
+                }
+                
+                /* Clamp offset to bytes written (corrupted data safety) */
+                if (offset > bytes_written) offset = bytes_written;
+                
                 /* Copy from window */
                 for (int i = 0; i < length && out_pos < pixel_count; i++) {
-                    int win_idx = (window_pos - offset + LZSS_WINDOW_SIZE) % LZSS_WINDOW_SIZE;
+                    int win_idx = (window_pos - offset + LZSS_WINDOW_SIZE) & (LZSS_WINDOW_SIZE - 1);
                     uint8_t val = window[win_idx];
                     window[window_pos] = val;
-                    window_pos = (window_pos + 1) % LZSS_WINDOW_SIZE;
+                    window_pos = (window_pos + 1) & (LZSS_WINDOW_SIZE - 1);
+                    bytes_written++;
                     
                     /* Expand via palette */
                     out[out_pos++] = pal[val < num_colors ? val : 0];
@@ -166,15 +227,15 @@ static void apply_delta_rle_xor(const uint8_t *delta, size_t delta_size) {
         } else if (cmd & 0x80) {
             /* Skip: advance pixel index */
             size_t skip = (cmd & 0x7F) + 1;
-            pixel_idx += skip;
-            /* Clamp to max to prevent overflow in next iteration */
-            if (pixel_idx > max_pixels) pixel_idx = max_pixels;
+            if (__builtin_expect(skip > max_pixels - pixel_idx, 0)) pixel_idx = max_pixels;
+            else pixel_idx += skip;
         } else {
             size_t count = cmd;
+            if (__builtin_expect(count > max_pixels - pixel_idx, 0)) count = max_pixels - pixel_idx;
             for (size_t i = 0; i < count && pixel_idx < max_pixels; i++) {
                 /* Bounds check before reading 2 bytes */
                 if (pos + 1 >= delta_size) break;
-                uint16_t xor_val = delta[pos] | (delta[pos + 1] << 8);
+                uint16_t xor_val = *(const uint16_t*)(delta + pos);
                 pos += 2;
                 frame_buffer[pixel_idx++] ^= xor_val;
             }
@@ -196,19 +257,21 @@ static void apply_delta_rle_direct(const uint8_t *delta, size_t delta_size) {
             break;
         } else if (cmd & 0x80) {
             /* Repeat: next 2 bytes repeated N times */
-            size_t count = (cmd & 0x7F) + 1;
+            size_t count = (cmd & 0x7F);
             if (pos + 1 >= delta_size) break;
-            uint16_t val = delta[pos] | (delta[pos + 1] << 8);
+            uint16_t val = *(const uint16_t*)(delta + pos);
             pos += 2;
+            if (__builtin_expect(count > max_pixels - pixel_idx, 0)) count = max_pixels - pixel_idx;
             for (size_t i = 0; i < count && pixel_idx < max_pixels; i++) {
                 frame_buffer[pixel_idx++] = val;
             }
         } else {
             size_t count = cmd;
+            if (__builtin_expect(count > max_pixels - pixel_idx, 0)) count = max_pixels - pixel_idx;
             for (size_t i = 0; i < count && pixel_idx < max_pixels; i++) {
                 /* Bounds check before reading 2 bytes */
                 if (pos + 1 >= delta_size) break;
-                frame_buffer[pixel_idx++] = delta[pos] | (delta[pos + 1] << 8);
+                frame_buffer[pixel_idx++] = *(const uint16_t*)(delta + pos);
                 pos += 2;
             }
         }
@@ -221,16 +284,17 @@ static void apply_delta_sparse_xor(const uint8_t *delta, size_t delta_size) {
     if (delta_size < 4) return;
     
     size_t pos = 0;
-    size_t changed = delta[pos] | (delta[pos + 1] << 8) | 
-	                 ((size_t)delta[pos + 2] << 16) | ((size_t)delta[pos + 3] << 24);
+    size_t changed = *(const uint32_t*)(delta + pos);
     pos += 4;
     
     size_t max_pixels = (size_t)FRAME_W * (size_t)FRAME_H;
+
+    size_t max_changed = (delta_size - 4) / 6;
+    if (__builtin_expect(changed > max_changed, 0)) changed = max_changed;
     
     for (size_t i = 0; i < changed && pos + 5 < delta_size; i++) {
-        size_t idx = delta[pos] | (delta[pos + 1] << 8) | 
-		             ((size_t)delta[pos + 2] << 16) | ((size_t)delta[pos + 3] << 24);
-        uint16_t xor_val = delta[pos + 4] | (delta[pos + 5] << 8);
+        size_t idx = *(const uint32_t*)(delta + pos);
+        uint16_t xor_val = *(const uint16_t*)(delta + pos + 4);
         pos += 6;
         
         if (idx < max_pixels) {
@@ -245,9 +309,8 @@ static void apply_delta_raw(const uint8_t *raw, size_t size) {
     size_t max_pixels = (size_t)FRAME_W * (size_t)FRAME_H;
     if (pixels > max_pixels) pixels = max_pixels;
     
-    for (size_t i = 0; i < pixels; i++) {
-        frame_buffer[i] = raw[i * 2] | (raw[i * 2 + 1] << 8);
-    }
+    /* Direct copy: x86_64 little-endian, RGB565 bytes map directly to uint16_t */
+    memcpy(frame_buffer, raw, pixels * 2);
 }
 
 /* Apply delta based on compression method */
@@ -396,15 +459,12 @@ static void fill_rect(uint8_t *fbmem, int fb_w, int fb_h, int line_len, int bpp,
 
 /* SSE2 optimized RGB565 to XRGB8888 conversion (standard layout: R=16, G=8, B=0) */
 /* Processes 8 pixels at once. Requires SSE2 capable CPU (all x86_64 have it). */
-/* Uses non-temporal stores when aligned for optimal VRAM bandwidth */
+/* NOTE: Do not use non-temporal stores on fbdev mmap: some drivers/mappings corrupt output */
 static void blit_to_fb_32bpp_sse2(uint32_t *dst, const uint16_t *src, int count) {
     /* Pre-compute masks outside loop - guaranteed not to be recomputed each iteration */
     const __m128i r_mask = _mm_set1_epi32(0x0000F800);  /* bits 11-15 */
     const __m128i g_mask = _mm_set1_epi32(0x000007E0);  /* bits 5-10 */
     const __m128i b_mask = _mm_set1_epi32(0x0000001F);  /* bits 0-4 */
-    
-    /* Check if destination is 16-byte aligned for streaming stores */
-    int use_streaming = (((unsigned long)dst & 0xF) == 0);
     
     int i = 0;
     
@@ -444,18 +504,9 @@ static void blit_to_fb_32bpp_sse2(uint32_t *dst, const uint16_t *src, int count)
         __m128i result_hi = _mm_or_si128(_mm_or_si128(r_hi, g_hi), b_hi);
         
         /* Store 8 XRGB8888 pixels (32 bytes) */
-        /* Use streaming stores for aligned VRAM writes (2x bandwidth), unaligned for safety */
-        if (use_streaming) {
-            _mm_stream_si128((__m128i*)(dst + i), result_lo);
-            _mm_stream_si128((__m128i*)(dst + i + 4), result_hi);
-        } else {
-            _mm_storeu_si128((__m128i*)(dst + i), result_lo);
-            _mm_storeu_si128((__m128i*)(dst + i + 4), result_hi);
-        }
+        _mm_storeu_si128((__m128i*)(dst + i), result_lo);
+        _mm_storeu_si128((__m128i*)(dst + i + 4), result_hi);
     }
-    
-    /* SFENCE required after streaming stores to ensure completion */
-    if (use_streaming) _mm_sfence();
     
     /* Handle remaining pixels with scalar code */
     for (; i < count; i++) {
@@ -468,15 +519,12 @@ static void blit_to_fb_32bpp_sse2(uint32_t *dst, const uint16_t *src, int count)
 }
 
 /* SSE2 optimized RGB565 to BGRX8888 conversion (BGR layout: R=0, G=8, B=16) */
-/* Uses non-temporal stores when aligned for optimal VRAM bandwidth */
+/* NOTE: Do not use non-temporal stores on fbdev mmap: some drivers/mappings corrupt output */
 static void blit_to_fb_32bpp_sse2_bgr(uint32_t *dst, const uint16_t *src, int count) {
     /* Hoist mask constants outside loop */
     const __m128i r_mask = _mm_set1_epi32(0x0000F800);  /* bits 11-15 */
     const __m128i g_mask = _mm_set1_epi32(0x000007E0);  /* bits 5-10 */
     const __m128i b_mask = _mm_set1_epi32(0x0000001F);  /* bits 0-4 */
-    
-    /* Check if destination is 16-byte aligned for streaming stores */
-    int use_streaming = (((unsigned long)dst & 0xF) == 0);
     
     int i = 0;
     
@@ -508,18 +556,9 @@ static void blit_to_fb_32bpp_sse2_bgr(uint32_t *dst, const uint16_t *src, int co
         __m128i result_lo = _mm_or_si128(_mm_or_si128(r_lo, g_lo), b_lo);
         __m128i result_hi = _mm_or_si128(_mm_or_si128(r_hi, g_hi), b_hi);
         
-        /* Use streaming stores for aligned VRAM writes, unaligned for safety */
-        if (use_streaming) {
-            _mm_stream_si128((__m128i*)(dst + i), result_lo);
-            _mm_stream_si128((__m128i*)(dst + i + 4), result_hi);
-        } else {
-            _mm_storeu_si128((__m128i*)(dst + i), result_lo);
-            _mm_storeu_si128((__m128i*)(dst + i + 4), result_hi);
-        }
+        _mm_storeu_si128((__m128i*)(dst + i), result_lo);
+        _mm_storeu_si128((__m128i*)(dst + i + 4), result_hi);
     }
-    
-    /* SFENCE required after streaming stores */
-    if (use_streaming) _mm_sfence();
     
     for (; i < count; i++) {
         uint16_t pixel = src[i];
@@ -700,25 +739,137 @@ static void blit_frame_dblbuf(uint8_t *fbmem, int fb_w, int fb_h, int line_len, 
         if (restore_y + restore_h > fb_h) restore_h = fb_h - restore_y;
         
         if (restore_w > 0 && restore_h > 0) {
-            /* Copy damaged area from bg_buffer to back_buf */
+            const uint16_t bgc = BACKGROUND_COLOR;
+            const uint32_t bgc32 = (((uint32_t)((bgc >> 11) & 0x1F) << 3) << r_off) |
+                                   (((uint32_t)((bgc >> 5) & 0x3F) << 2) << g_off) |
+                                   (((uint32_t)(bgc & 0x1F) << 3) << b_off);
+            const int x0 = restore_x;
+            const int x1 = restore_x + restore_w;
+            const int bgx = bg_screen_x;
+            const int bgy = bg_screen_y;
+            const int bgx1 = bgx + BG_W;
+            const int bgy1 = bgy + BG_H;
+
             for (int dy = 0; dy < restore_h; dy++) {
-                int src_y = restore_y + dy;
-                int dst_y = restore_y + dy;
-                const uint16_t *src_row = bg_buffer + src_y * BG_W + restore_x;
-                
-                if (bpp == 32) {
-                    uint32_t *dst_row = (uint32_t *)(back_buf + dst_y * line_len + restore_x * 4);
-                    for (int dx = 0; dx < restore_w; dx++) {
-                        uint16_t pixel = src_row[dx];
-                        uint32_t r = (pixel >> 11) & 0x1F;
-                        uint32_t g = (pixel >> 5) & 0x3F;
-                        uint32_t b = pixel & 0x1F;
-                        dst_row[dx] = ((r << 3) << r_off) | ((g << 2) << g_off) | ((b << 3) << b_off);
+                const int scr_y = restore_y + dy;
+                const int dst_y = scr_y;
+
+                if (__builtin_expect(scr_y < bgy || scr_y >= bgy1, 0)) {
+                    if (bpp == 32) {
+                        uint32_t *dst_row = (uint32_t *)(back_buf + dst_y * line_len + x0 * 4);
+                        for (int dx = 0; dx < restore_w; dx++) dst_row[dx] = bgc32;
+                    } else if (bpp == 16) {
+                        uint16_t *dst_row = (uint16_t *)(back_buf + dst_y * line_len + x0 * 2);
+                        for (int dx = 0; dx < restore_w; dx++) dst_row[dx] = bgc;
+                    } else if (bpp == 24) {
+                        uint8_t *dst_row = back_buf + dst_y * line_len + x0 * 3;
+                        uint8_t rr = (uint8_t)(((bgc >> 11) & 0x1F) << 3);
+                        uint8_t gg = (uint8_t)(((bgc >> 5) & 0x3F) << 2);
+                        uint8_t bb = (uint8_t)((bgc & 0x1F) << 3);
+                        for (int dx = 0; dx < restore_w; dx++) {
+                            dst_row[dx * 3 + r_off] = rr;
+                            dst_row[dx * 3 + g_off] = gg;
+                            dst_row[dx * 3 + b_off] = bb;
+                        }
                     }
-                } else if (bpp == 16) {
-                    uint16_t *dst_row = (uint16_t *)(back_buf + dst_y * line_len + restore_x * 2);
-                    for (int dx = 0; dx < restore_w; dx++) {
-                        dst_row[dx] = src_row[dx];
+                    continue;
+                }
+
+                int in_l = x0;
+                if (in_l < bgx) in_l = bgx;
+                int in_r = x1;
+                if (in_r > bgx1) in_r = bgx1;
+
+                if (__builtin_expect(in_l >= in_r, 0)) {
+                    if (bpp == 32) {
+                        uint32_t *dst_row = (uint32_t *)(back_buf + dst_y * line_len + x0 * 4);
+                        for (int dx = 0; dx < restore_w; dx++) dst_row[dx] = bgc32;
+                    } else if (bpp == 16) {
+                        uint16_t *dst_row = (uint16_t *)(back_buf + dst_y * line_len + x0 * 2);
+                        for (int dx = 0; dx < restore_w; dx++) dst_row[dx] = bgc;
+                    } else if (bpp == 24) {
+                        uint8_t *dst_row = back_buf + dst_y * line_len + x0 * 3;
+                        uint8_t rr = (uint8_t)(((bgc >> 11) & 0x1F) << 3);
+                        uint8_t gg = (uint8_t)(((bgc >> 5) & 0x3F) << 2);
+                        uint8_t bb = (uint8_t)((bgc & 0x1F) << 3);
+                        for (int dx = 0; dx < restore_w; dx++) {
+                            dst_row[dx * 3 + r_off] = rr;
+                            dst_row[dx * 3 + g_off] = gg;
+                            dst_row[dx * 3 + b_off] = bb;
+                        }
+                    }
+                    continue;
+                }
+
+                const int bg_src_y = scr_y - bgy;
+                const uint16_t *src_row = bg_buffer + bg_src_y * BG_W;
+
+                if (x0 < in_l) {
+                    const int left_w = in_l - x0;
+                    if (bpp == 32) {
+                        uint32_t *dst_row = (uint32_t *)(back_buf + dst_y * line_len + x0 * 4);
+                        for (int dx = 0; dx < left_w; dx++) dst_row[dx] = bgc32;
+                    } else if (bpp == 16) {
+                        uint16_t *dst_row = (uint16_t *)(back_buf + dst_y * line_len + x0 * 2);
+                        for (int dx = 0; dx < left_w; dx++) dst_row[dx] = bgc;
+                    } else if (bpp == 24) {
+                        uint8_t *dst_row = back_buf + dst_y * line_len + x0 * 3;
+                        uint8_t rr = (uint8_t)(((bgc >> 11) & 0x1F) << 3);
+                        uint8_t gg = (uint8_t)(((bgc >> 5) & 0x3F) << 2);
+                        uint8_t bb = (uint8_t)((bgc & 0x1F) << 3);
+                        for (int dx = 0; dx < left_w; dx++) {
+                            dst_row[dx * 3 + r_off] = rr;
+                            dst_row[dx * 3 + g_off] = gg;
+                            dst_row[dx * 3 + b_off] = bb;
+                        }
+                    }
+                }
+
+                {
+                    const int mid_w = in_r - in_l;
+                    const int src_x = in_l - bgx;
+                    const uint16_t *src_mid = src_row + src_x;
+                    if (bpp == 32) {
+                        uint32_t *dst_row = (uint32_t *)(back_buf + dst_y * line_len + in_l * 4);
+                        for (int dx = 0; dx < mid_w; dx++) {
+                            uint16_t pixel = src_mid[dx];
+                            uint32_t r = (pixel >> 11) & 0x1F;
+                            uint32_t g = (pixel >> 5) & 0x3F;
+                            uint32_t b = pixel & 0x1F;
+                            dst_row[dx] = ((r << 3) << r_off) | ((g << 2) << g_off) | ((b << 3) << b_off);
+                        }
+                    } else if (bpp == 16) {
+                        uint16_t *dst_row = (uint16_t *)(back_buf + dst_y * line_len + in_l * 2);
+                        for (int dx = 0; dx < mid_w; dx++) dst_row[dx] = src_mid[dx];
+                    } else if (bpp == 24) {
+                        uint8_t *dst_row = back_buf + dst_y * line_len + in_l * 3;
+                        for (int dx = 0; dx < mid_w; dx++) {
+                            uint16_t pixel = src_mid[dx];
+                            dst_row[dx * 3 + r_off] = (uint8_t)(((pixel >> 11) & 0x1F) << 3);
+                            dst_row[dx * 3 + g_off] = (uint8_t)(((pixel >> 5) & 0x3F) << 2);
+                            dst_row[dx * 3 + b_off] = (uint8_t)((pixel & 0x1F) << 3);
+                        }
+                    }
+                }
+
+                if (in_r < x1) {
+                    const int right_w = x1 - in_r;
+                    if (bpp == 32) {
+                        uint32_t *dst_row = (uint32_t *)(back_buf + dst_y * line_len + in_r * 4);
+                        for (int dx = 0; dx < right_w; dx++) dst_row[dx] = bgc32;
+                    } else if (bpp == 16) {
+                        uint16_t *dst_row = (uint16_t *)(back_buf + dst_y * line_len + in_r * 2);
+                        for (int dx = 0; dx < right_w; dx++) dst_row[dx] = bgc;
+                    } else if (bpp == 24) {
+                        uint8_t *dst_row = back_buf + dst_y * line_len + in_r * 3;
+                        uint8_t rr = (uint8_t)(((bgc >> 11) & 0x1F) << 3);
+                        uint8_t gg = (uint8_t)(((bgc >> 5) & 0x3F) << 2);
+                        uint8_t bb = (uint8_t)((bgc & 0x1F) << 3);
+                        for (int dx = 0; dx < right_w; dx++) {
+                            dst_row[dx * 3 + r_off] = rr;
+                            dst_row[dx * 3 + g_off] = gg;
+                            dst_row[dx * 3 + b_off] = bb;
+                        }
                     }
                 }
             }
@@ -757,21 +908,24 @@ static void blit_frame_dblbuf(uint8_t *fbmem, int fb_w, int fb_h, int line_len, 
      * Use SIGALRM to interrupt after 1 second; if interrupted, skip vsync entirely.
      * NOTE: Must use a real handler (not SIG_IGN) to interrupt blocking ioctl with EINTR.
      */
-    static int vsync_skip = 0;  /* Skip vsync if previous attempt timed out */
-    
     if (!vsync_skip) {
-        /* Dummy handler - exists solely to interrupt blocking syscalls */
-        void vsync_alarm_handler(int sig) { (void)sig; }
-        
         /* Set up one-shot alarm to interrupt blocking ioctl */
         struct sigaction sa = { .__sa_handler = { .sa_handler = vsync_alarm_handler }, .sa_flags = 0 };
-        rt_sigaction(SIGALRM, &sa, NULL, 8);
+        struct sigaction old_sa;
+        rt_sigaction(SIGALRM, &sa, &old_sa, 8);
+
+        unsigned int prev_alarm = alarm(0);
         alarm(1);  /* 1 second timeout (generous for vsync) */
         
         __u32 vsync_arg = 0;
         int ret = ioctl(fb_fd, FBIO_WAITFORVSYNC, (unsigned long)&vsync_arg);
         
         alarm(0);  /* Cancel alarm */
+
+        /* Restore previous SIGALRM handler (boot/shutdown watchdog) */
+        rt_sigaction(SIGALRM, &old_sa, NULL, 8);
+
+        if (prev_alarm) alarm(prev_alarm);
         
         /* If ioctl was interrupted (EINTR), driver is buggy - skip future vsyncs */
         if (ret < 0) {
@@ -779,7 +933,15 @@ static void blit_frame_dblbuf(uint8_t *fbmem, int fb_w, int fb_h, int line_len, 
         }
     }
     
-    ioctl(fb_fd, FBIOPAN_DISPLAY, (unsigned long)&fb_vinfo);
+    int pan_ret = ioctl(fb_fd, FBIOPAN_DISPLAY, (unsigned long)&fb_vinfo);
+    if (__builtin_expect(pan_ret < 0, 0)) {
+        fb_has_dblbuf = 0;
+        fb_page = 0;
+        fb_vinfo.yoffset = 0;
+        fb_vinfo.xoffset = 0;
+        ioctl(fb_fd, FBIOPAN_DISPLAY, (unsigned long)&fb_vinfo);
+        return;
+    }
     
     fb_page = back_page;
 }
@@ -791,8 +953,12 @@ static void sleep_ms(unsigned int ms) {
         .tv_nsec = (ms % 1000) * 1000000L
     };
     struct timespec rem;
-    while (nanosleep(&req, &rem) != 0 && !terminate_requested) {
-        /* Retry with remaining time if interrupted, but exit if termination requested */
+    long ret;
+    while ((ret = nanosleep(&req, &rem)) != 0 && !terminate_requested) {
+        /* Only retry with remaining time if interrupted (EINTR) */
+        /* In freestanding mode, syscall returns -errno on error */
+        if (ret != -EINTR) break;
+        if (__builtin_expect(rem.tv_sec == 0 && rem.tv_nsec == 0, 0)) break;
         req = rem;
     }
 }
@@ -871,12 +1037,10 @@ int main(void) {
     signal(SIGINT, signal_handler);
     signal(SIGALRM, signal_handler);  /* For shutdown watchdog */
     
-    /* Shutdown watchdog: auto-terminate after 5 seconds if SHUTDOWN_MODE is set
-     * This is more reliable than shell-based sleep/kill under heavy I/O load
-     * during system shutdown when pagecache is being flushed to disk.
-     */
     if (getenv("SHUTDOWN_MODE")) {
-        alarm(5);  /* Auto-terminate after 5 seconds */
+        alarm(5);
+    } else {
+        alarm(MAX_BOOT_TIMEOUT_SEC);
     }
     
     /* Allocate frame buffer */
@@ -970,9 +1134,17 @@ int main(void) {
         /* 24bpp: determine byte order from vinfo offsets */
         /* vinfo.{red,green,blue}.offset gives bit position: 0, 8, or 16 */
         /* Convert to byte position: bit/8 = 0, 1, or 2 */
-        r_off = vinfo.red.offset / 8;
-        g_off = vinfo.green.offset / 8;
-        b_off = vinfo.blue.offset / 8;
+        /* Validate byte-alignment for robustness on exotic hardware */
+        if ((vinfo.red.offset & 7) || (vinfo.green.offset & 7) || (vinfo.blue.offset & 7)) {
+            /* Non-byte-aligned offsets - fallback to BGR byte order */
+            r_off = 2;
+            g_off = 1;
+            b_off = 0;
+        } else {
+            r_off = vinfo.red.offset / 8;
+            g_off = vinfo.green.offset / 8;
+            b_off = vinfo.blue.offset / 8;
+        }
     } else {
         /* 16bpp or other - use defaults (not used for these modes anyway) */
         r_off = 16;
@@ -994,9 +1166,19 @@ int main(void) {
     /* Animation on background image (centered or fullscreen) */
     x = (vinfo.xres - FRAME_W) / 2 + HORIZONTAL_OFFSET;
     y = (vinfo.yres - FRAME_H) / 2 + VERTICAL_OFFSET;
+    /* Clear to background color first (background image may not cover the full screen) */
+    fill_fb_color(fbmem, vinfo.xres, vinfo.yres, finfo.line_length,
+                  vinfo.bits_per_pixel, BACKGROUND_COLOR, r_off, g_off, b_off);
     /* Draw background first */
+#if DISPLAY_MODE == 1
+    bg_screen_x = (vinfo.xres - BG_W) / 2 + BG_OFFSET_X;
+    bg_screen_y = (vinfo.yres - BG_H) / 2 + BG_OFFSET_Y;
+    blit_frame(fbmem, vinfo.xres, vinfo.yres, finfo.line_length, vinfo.bits_per_pixel,
+               bg_buffer, BG_W, BG_H, bg_screen_x, bg_screen_y, r_off, g_off, b_off);
+#else
     blit_frame(fbmem, vinfo.xres, vinfo.yres, finfo.line_length, vinfo.bits_per_pixel,
                bg_buffer, BG_W, BG_H, 0, 0, r_off, g_off, b_off);
+#endif
 #else
     /* Animation or static on solid background */
     x = (vinfo.xres - FRAME_W) / 2 + HORIZONTAL_OFFSET;
@@ -1027,17 +1209,41 @@ int main(void) {
 #if DISPLAY_MODE == 1 || DISPLAY_MODE == 2
     /* Single buffer: one blit is enough */
     if (!fb_has_dblbuf) {
-        blit_func(fbmem, vinfo.xres, vinfo.yres, finfo.line_length, vinfo.bits_per_pixel,
-                  bg_buffer, BG_W, BG_H, 0, 0, r_off, g_off, b_off);
+        fill_fb_color(fbmem, vinfo.xres, vinfo.yres, finfo.line_length,
+                      vinfo.bits_per_pixel, BACKGROUND_COLOR, r_off, g_off, b_off);
+        blit_frame(fbmem, vinfo.xres, vinfo.yres, finfo.line_length, vinfo.bits_per_pixel,
+                   bg_buffer, BG_W, BG_H,
+#if DISPLAY_MODE == 1
+                   bg_screen_x, bg_screen_y,
+#else
+                   0, 0,
+#endif
+                   r_off, g_off, b_off);
     } else {
         /* Double buffer: must initialize BOTH pages with background */
         /* Page 0 */
+        fill_fb_color(fbmem, vinfo.xres, vinfo.yres, finfo.line_length,
+                      vinfo.bits_per_pixel, BACKGROUND_COLOR, r_off, g_off, b_off);
         blit_frame(fbmem, vinfo.xres, vinfo.yres, finfo.line_length, vinfo.bits_per_pixel,
-                   bg_buffer, BG_W, BG_H, 0, 0, r_off, g_off, b_off);
+                   bg_buffer, BG_W, BG_H,
+#if DISPLAY_MODE == 1
+                   bg_screen_x, bg_screen_y,
+#else
+                   0, 0,
+#endif
+                   r_off, g_off, b_off);
         /* Page 1 (back buffer at offset yres * line_len) */
         uint8_t *page1 = fbmem + fb_yres * fb_line_len;
+        fill_fb_color(page1, vinfo.xres, vinfo.yres, finfo.line_length,
+                      vinfo.bits_per_pixel, BACKGROUND_COLOR, r_off, g_off, b_off);
         blit_frame(page1, vinfo.xres, vinfo.yres, finfo.line_length, vinfo.bits_per_pixel,
-                   bg_buffer, BG_W, BG_H, 0, 0, r_off, g_off, b_off);
+                   bg_buffer, BG_W, BG_H,
+#if DISPLAY_MODE == 1
+                   bg_screen_x, bg_screen_y,
+#else
+                   0, 0,
+#endif
+                   r_off, g_off, b_off);
     }
 #endif
     
@@ -1105,7 +1311,12 @@ int main(void) {
     }
 #endif
     
-    /* Graceful cleanup: clear framebuffer to black */
+    /* Graceful cleanup: reset pan to page 0 and clear framebuffer to black */
+    if (fb_has_dblbuf) {
+        fb_vinfo.yoffset = 0;
+        fb_vinfo.xoffset = 0;
+        ioctl(fb_fd, FBIOPAN_DISPLAY, (unsigned long)&fb_vinfo);
+    }
     memset(fbmem, 0, fb_size);
     munmap(fbmem, fb_size);
     

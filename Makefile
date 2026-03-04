@@ -10,7 +10,7 @@ CC = gcc
 
 # Nolibc flags (freestanding, no libc) - for fbdev version
 NOLIBC_FLAGS = -ffreestanding -fno-builtin -nostdlib -nostartfiles \
-               -Os -march=x86-64 -msse2 -fomit-frame-pointer -fstrict-aliasing \
+               -O2 -march=x86-64 -msse2 -fomit-frame-pointer -fstrict-aliasing \
                -fno-asynchronous-unwind-tables -fno-stack-protector \
                -fno-pic -fno-pie -fvisibility=hidden \
                -ffunction-sections -fdata-sections \
