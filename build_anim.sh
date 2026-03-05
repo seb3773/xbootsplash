@@ -45,13 +45,16 @@ BLUE='\033[34m'
 CYAN='\033[36m'
 BOLD='\033[1m'
 WHITE='\033[37m'
+GRAY='\033[90m'
 BLACK='\033[30m'
 YELLOW_GRAD1='\033[38;5;226m'
 YELLOW_GRAD2='\033[38;5;220m'
 YELLOW_GRAD3='\033[38;5;214m'
 YELLOW_GRAD4='\033[38;5;208m'
 YELLOW_GRAD5='\033[38;5;202m'
+BLUE_GRAD1='\033[38;5;51m' 
 BLUE_GRAD2='\033[38;5;45m'
+BLUE_GRAD3='\033[38;5;39m'
 BLUE_GRAD4='\033[38;5;33m'
 BLUE_GRAD5='\033[38;5;27m'
 NC='\033[0m' # No Color
@@ -84,6 +87,7 @@ BG_OFFSET_Y=0
 TARGET_RES=""
 LOOP_MODE=1  # 0=no loop, 1=full loop, 2=partial loop
 LOOP_START=0  # Start frame for partial loop
+INVERT_FRAMES=0  # 0=normal order (0→N), 1=inverted order (N→0)
 
 # If build-related CLI args are provided, we can bypass the interactive menu.
 NONINTERACTIVE_BUILD=0
@@ -215,6 +219,11 @@ while [[ $# -gt 0 ]]; do
             NONINTERACTIVE_BUILD=1
             shift 2
             ;;
+        -I|--invert)
+            INVERT_FRAMES=1
+            NONINTERACTIVE_BUILD=1
+            shift
+            ;;
         -r|--resolution)
             TARGET_RES="$2"
             NONINTERACTIVE_BUILD=1
@@ -290,24 +299,24 @@ run_noninteractive_build() {
 
 # Print functions
 print_header() {
-  echo -e "${CYAN}${BOLD}  ╔══════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}${BOLD}  ║${NC}${YELLOW_GRAD1}          ___             _    ___       _           _        ${CYAN}${BOLD}║${NC}"
-    echo -e "${CYAN}${BOLD}  ║${NC}${YELLOW_GRAD2}     __  | . > ___  ___ _| |_ / __> ___ | | ___  ___| |_      ${CYAN}${BOLD}║${NC}"
-    echo -e "${CYAN}${BOLD}  ║${NC}${YELLOW_GRAD3}     \\ \\/| . \\/ . \\/ . \\ | |  \\__ \\| . \\| |<_> |<_-<| . |     ${CYAN}${BOLD}║${NC}"
-    echo -e "${CYAN}${BOLD}  ║${NC}${YELLOW_GRAD4}     /\\_\\|___/\\___/\\___/ |_|  <___/|  _/|_|<___|/__/|_|_|     ${CYAN}${BOLD}║${NC}"
-    echo -e "${CYAN}${BOLD}  ║${NC}${BLUE_GRAD4}         SPLASH ANIMATION BUILDER${YELLOW_GRAD5}  |_| ${BLUE_GRAD4}by seb3773 - ${BLUE_GRAD2}v1        ${CYAN}${BOLD}║${NC}"
-    echo -e "${CYAN}${BOLD}  ╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo -e "${CYAN}${BOLD}      ┌──────────────────────────────────────────────────────────${BLUE_GRAD3}╖${NC}"
+    echo -e "${CYAN}${BOLD}      │${NC}${YELLOW_GRAD1}        ___             _    ___       _           _      ${BLUE_GRAD3}║${NC}"
+    echo -e "${CYAN}${BOLD}      │${NC}${YELLOW_GRAD2}   __  | . > ___  ___ _| |_ / __> ___ | | ___  ___| |_    ${BLUE_GRAD3}║${NC}"
+    echo -e "${CYAN}${BOLD}      │${NC}${YELLOW_GRAD3}   \\ \\/| . \\/ . \\/ . \\ | |  \\__ \\| . \\| |<_> |<_-<| . |   ${BLUE_GRAD3}║${NC}"
+    echo -e "${CYAN}${BOLD}      │${NC}${YELLOW_GRAD4}   /\\_\\|___/\\___/\\___/ |_|  <___/|  _/|_|<___|/__/|_|_|   ${BLUE_GRAD3}║${NC}"
+    echo -e "${CYAN}${BOLD}      │${NC}${BLUE_GRAD4}           ${BLUE_GRAD1}Li${BLUE_GRAD2}nu${BLUE_GRAD3}x S${BLUE_GRAD4}pl${BLUE_GRAD5}as${BLUE_GRAD4}h B${BLUE_GRAD3}ui${BLUE_GRAD2}ld${BLUE_GRAD1}er ${YELLOW_GRAD5} |_| ${BLUE_GRAD2}by${BLUE_GRAD3} se${BLUE_GRAD4}b3${BLUE_GRAD3}77${BLUE_GRAD2}3 - ${BLUE_GRAD1}v1      ${BLUE_GRAD3}║${NC}"
+    echo -e "${CYAN}${BOLD}      ${BLUE_GRAD3}╘══════════════════════════════════════════════════════════╝${NC}"
 }
 
 print_step() {
-    echo -e "\n  ${BLUE}${BOLD}━━━ ${WHITE}STEP ${BOLD}$1${BLUE} ━━━━━━━━━━━━━━━━━━━━━━━━━━ ${YELLOW}$2${NC}"
+    echo -e "  ${BOLD}${BLUE_GRAD5}━━━ ${WHITE}STEP ${BOLD}$1${BLUE_GRAD4} ━━━━━━${BLUE_GRAD3}━━━━${BLUE_GRAD2}━━${BLUE_GRAD1}━━${BLUE_GRAD2}━━${BLUE_GRAD3}━━━━${BLUE_GRAD4}━━━━━━ ${YELLOW}$2${NC}"
 }
 print_success() {
     echo -e "    ${GREEN}✓ $1${NC}"
 }
 
 print_error() {
-    echo -e "   ${RED}✗ $1${NC}"
+    echo -e "    ${RED}✗ $1${NC}"
 }
 
 print_info() {
@@ -324,7 +333,7 @@ ask_continue() {
     case "$response" in
         [nN][oO]|[nN])
             echo -e "\n${YELLOW}✖ Operation cancelled by user ✖${NC}"
-            exit 0
+            return 1
             ;;
         *)
             return 0
@@ -574,6 +583,12 @@ check_dependencies() {
         missing_pkgs+=("make")
     fi
     
+    # readelf for binary validation
+    if ! command -v readelf &> /dev/null; then
+        missing+=("readelf")
+        missing_pkgs+=("binutils")
+    fi
+    
     # ImageMagick for PNG conversion
     if ! command -v convert &> /dev/null; then
         missing+=("ImageMagick (convert)")
@@ -591,6 +606,31 @@ check_dependencies() {
     if ! ld -lpng -o /dev/null 2>/dev/null; then
         missing+=("libpng-dev")
         missing_pkgs+=("libpng-dev")
+    fi
+    
+    # Check for required source files
+    local src_missing=()
+    local required_sources=(
+        "generate_splash.c"
+        "splash_anim_delta.c"
+        "splash_anim_drm.c"
+        "nolibc.h"
+        "frames_delta.h"
+    )
+    
+    for src in "${required_sources[@]}"; do
+        if [ ! -f "$src" ]; then
+            src_missing+=("$src")
+        fi
+    done
+    
+    if [ ${#src_missing[@]} -gt 0 ]; then
+        print_error "Missing source files:"
+        for src in "${src_missing[@]}"; do
+            print_info "   - $src"
+        done
+        print_error "Cannot build without source files. Please clone the complete repository."
+        exit 1
     fi
     
     # Check for missing essential dependencies
@@ -762,7 +802,7 @@ analyze_frames() {
     print_success "Found $img_count image files"
     
     # Extract frame indices and detect pattern
-    print_info "☉ Detecting frame numbering pattern..."
+    print_info "   ☉ Detecting frame numbering pattern..."
     
     local first_frame=""
     local last_frame=""
@@ -856,15 +896,15 @@ analyze_frames() {
     fi
     
     # Display analysis results
-    echo -e "     ${BOLD}${GREEN}════════════════════════════════════════════════════════════════${NC}"
+    echo -e "     ${GREEN}════════════════════════════════════════════════════════════════${NC}"
     echo -e "     ${BOLD}${GREEN}                     ANALYSIS RESULTS                           ${NC}"
-    echo -e "     ${BOLD}${GREEN}════════════════════════════════════════════════════════════════${NC}"
-    echo -e "     ${CYAN}Total frames:${NC}    $img_count"
-    echo -e "     ${CYAN}Frame size:${NC}      $frame_size pixels"
-    echo -e "     ${CYAN}First frame:${NC}     $first_frame (index $first_index)"
-    echo -e "     ${CYAN}Last frame:${NC}      $last_frame (index $last_index)"
-    echo -e "     ${CYAN}Index range:${NC}     $first_index → $last_index"
-    echo -e "     ${BOLD}${GREEN}════════════════════════════════════════════════════════════════${NC}"
+    echo -e "     ${GREEN}════════════════════════════════════════════════════════════════${NC}"
+    echo -e "     ${CYAN}Total frames:${NC}${BOLD}    $img_count${NC}"
+    echo -e "     ${CYAN}Frame size:${NC}      ${BOLD}$frame_size${NC} pixels"
+    echo -e "     ${CYAN}First frame:${NC}     ${BOLD}$first_frame${NC} (index $first_index)"
+    echo -e "     ${CYAN}Last frame:${NC}      ${BOLD}$last_frame${NC} (index $last_index)"
+    echo -e "     ${CYAN}Index range:${NC}     ${BOLD}$first_index → $last_index"${NC}
+    echo -e "     ${GREEN}════════════════════════════════════════════════════════════════${NC}"
     
     # Check for missing frames
     local expected_count=$((last_index - first_index + 1))
@@ -881,19 +921,19 @@ analyze_frames() {
 select_mode() {
     echo ""
     print_step "2" "Select splash mode"
-    echo -e "   ╭──────────────────────────────────────────────────────────────────────────────╮"
-    echo -e "   │  ${CYAN}1)${NC} Animation on solid background (default)                                  │"
-    echo -e "   │      ${YELLOW}→ Animation frames on uniform color background${NC}                          │"
-    echo -e "   │  ${CYAN}2)${NC} Animation on background image                                            │"
-    echo -e "   │      ${YELLOW}→ Animation frames overlaid on a static image centered on uniform color${NC} │"
-    echo -e "   │  ${CYAN}3)${NC} Animation on background image (full screen)                              │"
-    echo -e "   │      ${YELLOW}→ Animation frames overlaid on a full-screen image${NC}                      │"
-    echo -e "   │  ${CYAN}4)${NC} Static image on solid background                                         │"
-    echo -e "   │      ${YELLOW}→ Single static image centered on uniform color${NC}                         │"
-    echo -e "   │  ${CYAN}5)${NC} Static image full screen                                                 │"
-    echo -e "   │      ${YELLOW}→ Single static image filling the screen${NC}                                │"
-    echo -e "   ╰──────────────────────────────────────────────────────────────────────────────╯"
-    echo -en "   ${YELLOW}➤ Select mode [${CYAN}1${YELLOW}]: ${NC}"
+    echo -e "  ${YELLOW_GRAD3}╭──────────────────────────────────────────────────────────────────────────────╮"
+    echo -e "  ${YELLOW_GRAD3}│  ${CYAN}1)${NC} Animation on solid background (default)                                  ${YELLOW_GRAD3}│"
+    echo -e "  ${YELLOW_GRAD3}│      ${YELLOW}→ Animation frames on uniform color background${NC}                          ${YELLOW_GRAD3}│"
+    echo -e "  ${YELLOW_GRAD3}│  ${CYAN}2)${NC} Animation on background image                                            ${YELLOW_GRAD3}│"
+    echo -e "  ${YELLOW_GRAD3}│      ${YELLOW}→ Animation frames overlaid on a static image centered on uniform color${NC} ${YELLOW_GRAD3}│"
+    echo -e "  ${YELLOW_GRAD3}│  ${CYAN}3)${NC} Animation on background image (full screen)                              ${YELLOW_GRAD3}│"
+    echo -e "  ${YELLOW_GRAD3}│      ${YELLOW}→ Animation frames overlaid on a full-screen image${NC}                      ${YELLOW_GRAD3}│"
+    echo -e "  ${YELLOW_GRAD3}│  ${CYAN}4)${NC} Static image on solid background                                         ${YELLOW_GRAD3}│"
+    echo -e "  ${YELLOW_GRAD3}│      ${YELLOW}→ Single static image centered on uniform color${NC}                         ${YELLOW_GRAD3}│"
+    echo -e "  ${YELLOW_GRAD3}│  ${CYAN}5)${NC} Static image full screen                                                 ${YELLOW_GRAD3}│"
+    echo -e "  ${YELLOW_GRAD3}│      ${YELLOW}→ Single static image filling the screen${NC}                                ${YELLOW_GRAD3}│"
+    echo -e "  ${YELLOW_GRAD3}┕━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┙"
+    echo -en "  ${YELLOW}➤ Select mode [${CYAN}1${YELLOW}]: ${NC}"
     read -r mode_choice
     
     case "$mode_choice" in
@@ -907,7 +947,7 @@ select_mode() {
     local mode_names=("Animation on solid background" "Animation on background image (centered)" 
                       "Animation on background image (fullscreen)" "Static image on solid background" 
                       "Static image full screen")
-    print_info "Selected: [${mode_names[$DISPLAY_MODE]}]"
+    print_info " ❖ Selected: [${BOLD}${mode_names[$DISPLAY_MODE]}${NC}]"
     
     # Mode-specific prompts
     # Modes 1 and 2: need background image
@@ -955,110 +995,209 @@ select_mode() {
 get_parameters() {
     print_step "4" "Configure display parameters"
     
+    # Select coordinate system
+    local COORD_MODE=0  # 0=offsets, 1=absolute coordinates
+    echo ""
+    echo -e "  ${BOLD}Select a coordinates system:${NC}"
+    echo ""
+    echo -e "  ${CYAN}1)${NC} ${BOLD}Offsets mode:${NC}"
+    echo -e "      Each element is automatically centered, and you can specify coordinates"
+    echo -e "      offsets from these centered positions."
+    echo -e "  ${CYAN}2)${NC} ${BOLD}Coordinates mode:${NC}"
+    echo -e "      You specify absolute coordinates for each element."
+    echo -en "  ${YELLOW}➤ Select coordinates system [${CYAN}1${YELLOW}]: ${NC}"
+    read -r coord_choice
+    
+    case "$coord_choice" in
+        2) COORD_MODE=1 ;;
+        *) COORD_MODE=0 ;;
+    esac
+    
+    if [ $COORD_MODE -eq 0 ]; then
+        print_info " ❖ Using ${BOLD}Offsets mode${NC} (relative to center)"
+    else
+        print_info " ❖ Using ${BOLD}Coordinates mode${NC} (absolute positioning)"
+    fi
+    
     # Show mode-specific diagram
     case $DISPLAY_MODE in
         0)
             echo -e "${CYAN}"
-            echo "        Animation on solid background"
-            echo "   ┌─────────────────────────────────────┐"
-            echo -e "   │${GRAY_BG}                                     ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}                                     ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}                                     ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}                                     ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}                                     ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}                                     ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}             (center)                ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}                                     ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}                                     ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}            ${BLACK}↓ offset_y${CYAN}               ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}    ┌───────────┐${BLACK}← offset_x${CYAN}          ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}    │${CYAN_BG}${WHITE} Animation ${BG_RESET}${CYAN}${GRAY_BG}│                    ${BG_RESET}${CYAN}│"
-            echo -e "   │${GRAY_BG}    └───────────┘                    ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}         ${YELLOW}#Background color${CYAN}${GRAY_BG}           ${BG_RESET}${CYAN}│"
-            echo -e "   └─────────────────────────────────────┘"
+            echo -e "           ${BOLD}Animation on solid background${NC}${CYAN}"
+            echo -e "   ┌────────────────────────────────────────────┐"
+            echo -e "   │${GRAY_BG}                                            ${BG_RESET}│"
+            echo -e "   │${GRAY_BG}                                            ${BG_RESET}│"
+            echo -e "   │${GRAY_BG}                                            ${BG_RESET}│"
+            echo -e "   │${GRAY_BG}                                            ${BG_RESET}│"
+            echo -e "   │${GRAY_BG}                                            ${BG_RESET}│"
+            echo -e "   │${GRAY_BG}                                            ${BG_RESET}│"
+            if [ $COORD_MODE -eq 0 ]; then
+            echo -e "   │${GRAY_BG}                  ${YELLOW_GRAD5}(center)${NC}${CYAN}${GRAY_BG}                  ${BG_RESET}${NC}${CYAN}│"
+            else
+            echo -e "   │${GRAY_BG}                                            ${BG_RESET}│"
+            fi
+            echo -e "   │${GRAY_BG}                                            ${BG_RESET}│"
+            if [ $COORD_MODE -eq 1 ]; then
+            echo -e "   │${GRAY_BG}         ${BLACK}y${CYAN}                                  ${BG_RESET}│"
+            echo -e "   │${GRAY_BG}         ${BLACK}↓${CYAN}                                  ${BG_RESET}│"
+            fi
+            if [ $COORD_MODE -eq 0 ]; then
+            echo -e "   │${GRAY_BG}               ${BLACK}offset_y${CYAN}                     ${BG_RESET}│"
+            echo -e "   │${GRAY_BG}               ${BLACK}↓${CYAN}                            ${BG_RESET}│"
+            fi
+            if [ $COORD_MODE -eq 1 ]; then
+            echo -e "   │${GRAY_BG}       ${BLACK}x→${CYAN}┌───────────┐ ${CYAN}                     ${BG_RESET}│"
+            echo -e "   │${GRAY_BG}         │${CYAN_BG}${WHITE} Animation ${BG_RESET}${CYAN}${GRAY_BG}│                      ${BG_RESET}${CYAN}│"
+            fi            
+            if [ $COORD_MODE -eq 0 ]; then
+            echo -e "   │${GRAY_BG}         ┌───────────┐ ${CYAN}                     ${BG_RESET}│"
+            echo -e "   │${GRAY_BG}${BLACK}offset_x→${CYAN}│${CYAN_BG}${WHITE} Animation ${BG_RESET}${CYAN}${GRAY_BG}│                      ${BG_RESET}${CYAN}│"
+            fi            
+            echo -e "   │${GRAY_BG}         └───────────┘                      ${BG_RESET}${CYAN}│"
+            echo -e "   │${GRAY_BG}              ${YELLOW}#Background_color${CYAN}${GRAY_BG}             ${BG_RESET}${NC}${CYAN}│"
+            echo -e "   └────────────────────────────────────────────┘"
             echo -e "${NC}"
             ;;
         1)
             echo -e "${CYAN}"
-            echo "        Animation on background image"
-            echo "   ┌──────────────────────────────────────┐"
-            echo -e "   │${GRAY_BG}                                      ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}                                      ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}                   ${BLACK}image offset_y${CYAN}     ${BG_RESET}│"
-            echo -e "   │${GRAY_BG} ${BLACK}image offset_x${CYAN}    ${BLACK}↓${CYAN}                  ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}      ${BLACK}→${CYAN}┌────────────────────────────┐ ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}       │${GREEN_BG}Background image            ${BG_RESET}${GRAY_BG}│ ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}       │${GREEN_BG}           ${BLACK}↓${CYAN}                ${BG_RESET}${GRAY_BG}│ ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}       │${GREEN_BG}       (center)             ${BG_RESET}${GRAY_BG}│ ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}       │${GREEN_BG}           ${BLACK}↓offset_y${CYAN}        ${BG_RESET}${GRAY_BG}│ ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}       │${GREEN_BG}    ┌─────────┐             ${BG_RESET}${GRAY_BG}│ ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}       │${GREEN_BG}    │${CYAN_BG}${WHITE}Animation${BG_RESET}${CYAN}${GREEN_BG}│             ${BG_RESET}${GRAY_BG}│ ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}       │${GREEN_BG}   ${BLACK}→${CYAN}└─────────┘             ${BG_RESET}${GRAY_BG}│ ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}       │${GREEN_BG}${BLACK}offset_x${CYAN}                    ${BG_RESET}${GRAY_BG}│ ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}       └────────────────────────────┘ ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}                    #Background color ${BG_RESET}│"
-            echo -e "   └──────────────────────────────────────┘"
+            echo -e "           ${BOLD}Animation on background image${NC}${CYAN}"
+            echo -e "   ┌────────────────────────────────────────────┐"
+            echo -e "   │${GRAY_BG}                                            ${BG_RESET}│"
+            echo -e "   │${GRAY_BG}                                            ${BG_RESET}│"
+            if [ $COORD_MODE -eq 1 ]; then
+            echo -e "   │${GRAY_BG}              ${BLACK}image y${CYAN}                       ${BG_RESET}│"
+            echo -e "   │${GRAY_BG}               ${BLACK}↓${CYAN}                            ${BG_RESET}│"
+            fi
+            if [ $COORD_MODE -eq 0 ]; then
+            echo -e "   │${GRAY_BG}                           ${BLACK}image offset_y${CYAN}   ${BG_RESET}│"
+            echo -e "   │${GRAY_BG}                           ${BLACK}↓${CYAN}                ${BG_RESET}│"
+            echo -e "   │${GRAY_BG}               ┌────────────────────────┐   ${BG_RESET}│"
+            fi
+            if [ $COORD_MODE -eq 1 ]; then
+            echo -e "   │${GRAY_BG}       ${BLACK}image x${CYAN}${BLACK}→${CYAN}┌────────────────────────┐   ${BG_RESET}│"
+            fi
+            echo -e "   │${GRAY_BG}               │${GREEN_BG}    ${BLUE_GRAD4}Background image${CYAN}    ${BG_RESET}${GRAY_BG}│   ${BG_RESET}│"
+            echo -e "   │${GRAY_BG}               │${GREEN_BG}                        ${BG_RESET}${GRAY_BG}│   ${BG_RESET}│"
+            if [ $COORD_MODE -eq 0 ]; then
+            echo -e "   │${GRAY_BG}               │${GREEN_BG}  ${YELLOW_GRAD5}(center)${NC}${CYAN}${GREEN_BG}              ${BG_RESET}${GRAY_BG}│   ${BG_RESET}│"
+            else
+            echo -e "   │${GRAY_BG}               │${GREEN_BG}          ${CYAN}${GREEN_BG}              ${BG_RESET}${GRAY_BG}│   ${BG_RESET}│"
+            fi
+            if [ $COORD_MODE -eq 0 ]; then
+            echo -e "   │${GRAY_BG}               │${GREEN_BG}             ${BLACK}↓offset_y${CYAN}${BG_RESET}${GREEN_BG}${CYAN}  ${GRAY_BG}│   ${BG_RESET}${NC}${CYAN}│"
+            fi
+            if [ $COORD_MODE -eq 1 ]; then
+            echo -e "   │${GRAY_BG}               │${GREEN_BG}        ${BLACK}↓y${CYAN}              ${BG_RESET}${GRAY_BG}${CYAN}│   ${BG_RESET}${NC}${CYAN}│"
+            fi
+            if [ $COORD_MODE -eq 1 ]; then
+            echo -e "   │${GRAY_BG}               │${GREEN_BG}      ${BLACK}x→${CYAN}┌─────────┐     ${BG_RESET}${GRAY_BG}│   ${BG_RESET}│"
+            echo -e "   │${GRAY_BG}               │${GREEN_BG}        │${CYAN_BG}${WHITE}Animation${BG_RESET}${CYAN}${GREEN_BG}│     ${BG_RESET}${GRAY_BG}│   ${BG_RESET}│"
+            fi
+            if [ $COORD_MODE -eq 0 ]; then
+            echo -e "   │${GRAY_BG}${BLACK}image_offset_x→${CYAN}│${GREEN_BG}        ┌─────────┐     ${BG_RESET}${GRAY_BG}│   ${BG_RESET}│"
+            echo -e "   │${GRAY_BG}               │${GREEN_BG}       ${BLACK}→${CYAN}│${CYAN_BG}${WHITE}Animation${BG_RESET}${CYAN}${GREEN_BG}│     ${BG_RESET}${GRAY_BG}│   ${BG_RESET}│"
+            fi
+            if [ $COORD_MODE -eq 0 ]; then
+            echo -e "   │${GRAY_BG}               │${GREEN_BG}${BLACK}offset_x${CYAN}└─────────┘     ${BG_RESET}${GRAY_BG}│   ${BG_RESET}│"
+            fi
+            if [ $COORD_MODE -eq 1 ]; then
+            echo -e "   │${GRAY_BG}               │${GREEN_BG}        └─────────┘     ${BG_RESET}${GRAY_BG}│   ${BG_RESET}│"
+            fi
+            echo -e "   │${GRAY_BG}               │${GREEN_BG}                        ${BG_RESET}${GRAY_BG}│   ${BG_RESET}│"
+            echo -e "   │${GRAY_BG}               └────────────────────────┘   ${BG_RESET}│"
+            echo -e "   │${GRAY_BG}              ${YELLOW}#Background_color${CYAN}${GRAY_BG}             ${BG_RESET}${NC}${CYAN}│"
+            echo -e "   └────────────────────────────────────────────┘"
             echo -e "${NC}"
             ;;
         2)
             echo -e "${CYAN}"
-            echo "   Animation on full screen background image"
-            echo "   ┌─────────────────────────────────────┐"
-            echo -e "   │${GRAY_BG}      Background image (full)        ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}                                     ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}                                     ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}                                     ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}                                     ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}                                     ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}             (center)                ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}                ${BLACK}↓offset_y${CYAN}            ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}        ┌─────────┐                  ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}        │${CYAN_BG}${WHITE}Animation${BG_RESET}${CYAN}${GRAY_BG}│                  ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}       ${BLACK}→${CYAN}└─────────┘                  ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}${BLACK}offset_x${CYAN}                             ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}                                     ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}                                     ${BG_RESET}│"
-            echo -e "   └─────────────────────────────────────┘"
+            echo -e "      ${BOLD}Animation on full screen background image${NC}${CYAN}"
+            echo -e "   ┌────────────────────────────────────────────┐"
+            echo -e "   │${GREEN_BG}           ${BLUE_GRAD4}Background image (full)${CYAN}          ${BG_RESET}│"
+            echo -e "   │${GREEN_BG}                                            ${BG_RESET}│"
+            echo -e "   │${GREEN_BG}                                            ${BG_RESET}│"
+            echo -e "   │${GREEN_BG}                                            ${BG_RESET}│"
+            echo -e "   │${GREEN_BG}                                            ${BG_RESET}│"
+            echo -e "   │${GREEN_BG}                                            ${BG_RESET}│"
+            if [ $COORD_MODE -eq 0 ]; then
+            echo -e "   │${GREEN_BG}                  ${YELLOW_GRAD5}(center)${NC}${CYAN}${GREEN_BG}                  ${BG_RESET}│"
+            else
+            echo -e "   │${GREEN_BG}                                            ${BG_RESET}│"
+            fi
+            if [ $COORD_MODE -eq 1 ]; then
+            echo -e "   │${GREEN_BG}         ${BLACK}↓y${CYAN}                                 ${BG_RESET}│"
+            echo -e "   │${GREEN_BG}       ${BLACK}x→${CYAN}┌─────────┐                        ${BG_RESET}│"
+            echo -e "   │${GREEN_BG}         │${CYAN_BG}${WHITE}Animation${BG_RESET}${CYAN}${GREEN_BG}│                        ${BG_RESET}│"
+            fi
+            if [ $COORD_MODE -eq 0 ]; then  
+            echo -e "   │${GREEN_BG}              ${BLACK}↓offset_y${CYAN}                     ${BG_RESET}│"
+            echo -e "   │${GREEN_BG}         ┌─────────┐                        ${BG_RESET}│"
+            echo -e "   │${GREEN_BG}${BLACK}offset_x→${CYAN}│${CYAN_BG}${WHITE}Animation${BG_RESET}${CYAN}${GREEN_BG}│                        ${BG_RESET}│"
+            fi
+            echo -e "   │${GREEN_BG}         └─────────┘                        ${BG_RESET}│"
+            echo -e "   │${GREEN_BG}                                            ${BG_RESET}│"
+            echo -e "   │${GREEN_BG}                                            ${BG_RESET}│"
+            echo -e "   │${GREEN_BG}                                            ${BG_RESET}│"
+            echo -e "   │${GREEN_BG}                                            ${BG_RESET}│"
+            echo -e "   └────────────────────────────────────────────┘"
             echo -e "${NC}"
             ;;
         3)
             echo -e "${CYAN}"
-            echo "      Static image on solid background"
-            echo "   ┌─────────────────────────────────────┐"
-            echo -e "   │${GRAY_BG}                                     ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}                                     ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}                  ${BLACK}image offset_y${CYAN}     ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}${BLACK}image offset_x${CYAN}    ${BLACK}↓${CYAN}                  ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}     ${BLACK}→${CYAN}┌────────────────────────────┐ ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}      │${GREEN_BG}Static image                ${BG_RESET}${GRAY_BG}│ ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}      │${GREEN_BG}                            ${BG_RESET}${GRAY_BG}│ ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}      │${GREEN_BG}       (center)             ${BG_RESET}${GRAY_BG}│ ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}      │${GREEN_BG}                            ${BG_RESET}${GRAY_BG}│ ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}      │${GREEN_BG}                            ${BG_RESET}${GRAY_BG}│ ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}      │${GREEN_BG}                            ${BG_RESET}${GRAY_BG}│ ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}      └────────────────────────────┘ ${BG_RESET}│"
-            echo -e "   │${GRAY_BG}                   #Background color ${BG_RESET}│"
-            echo "   └─────────────────────────────────────┘"
+            echo -e "         ${BOLD}Static image on solid background${NC}${CYAN}"
+            echo -e "   ┌────────────────────────────────────────────┐"
+            echo -e "   │${GRAY_BG}                                            ${BG_RESET}│"
+            echo -e "   │${GRAY_BG}                                            ${BG_RESET}│"
+            if [ $COORD_MODE -eq 0 ]; then
+            echo -e "   │${GRAY_BG}                           ${BLACK}image offset_y${CYAN}   ${BG_RESET}│"
+            echo -e "   │${GRAY_BG}                           ${BLACK}↓${CYAN}                ${BG_RESET}│"
+            echo -e "   │${GRAY_BG}               ┌────────────────────────┐   ${BG_RESET}│"
+            fi
+            if [ $COORD_MODE -eq 1 ]; then
+            echo -e "   │${GRAY_BG}                ${BLACK}image y${CYAN}                     ${BG_RESET}│"
+            echo -e "   │${GRAY_BG}                ${BLACK}↓${CYAN}                           ${BG_RESET}│"
+            echo -e "   │${GRAY_BG}       ${BLACK}image x${CYAN}${BLACK}→${CYAN}┌────────────────────────┐   ${BG_RESET}│"
+            fi
+            echo -e "   │${GRAY_BG}               │${GREEN_BG}    ${BLUE_GRAD4}Background image${CYAN}    ${BG_RESET}${GRAY_BG}│   ${BG_RESET}│"
+            echo -e "   │${GRAY_BG}               │${GREEN_BG}                        ${BG_RESET}${GRAY_BG}│   ${BG_RESET}│"
+            if [ $COORD_MODE -eq 0 ]; then
+            echo -e "   │${GRAY_BG}               │${GREEN_BG}  ${YELLOW_GRAD5}(center)${NC}${CYAN}${GREEN_BG}              ${BG_RESET}${GRAY_BG}│   ${BG_RESET}│"
+            else
+            echo -e "   │${GRAY_BG}               │${GREEN_BG}                        ${BG_RESET}${GRAY_BG}│   ${BG_RESET}│"
+            fi
+            echo -e "   │${GRAY_BG}               │${GREEN_BG}                        ${BG_RESET}${GRAY_BG}${CYAN}│   ${BG_RESET}${NC}${CYAN}│"
+            if [ $COORD_MODE -eq 0 ]; then
+            echo -e "   │${GRAY_BG}${BLACK}image offset_x${CYAN}${BLACK}→${CYAN}│${GREEN_BG}                        ${BG_RESET}${GRAY_BG}│   ${BG_RESET}│"
+            fi
+            if [ $COORD_MODE -eq 1 ]; then
+            echo -e "   │${GRAY_BG}               ${CYAN}│${GREEN_BG}                        ${BG_RESET}${GRAY_BG}│   ${BG_RESET}│"
+            fi
+            echo -e "   │${GRAY_BG}               │${GREEN_BG}                        ${BG_RESET}${GRAY_BG}│   ${BG_RESET}│"
+            echo -e "   │${GRAY_BG}               │${GREEN_BG}                        ${BG_RESET}${GRAY_BG}│   ${BG_RESET}│"
+            echo -e "   │${GRAY_BG}               │${GREEN_BG}                        ${BG_RESET}${GRAY_BG}│   ${BG_RESET}│"
+            echo -e "   │${GRAY_BG}               └────────────────────────┘   ${BG_RESET}│"
+            echo -e "   │${GRAY_BG}              ${YELLOW}#Background_color${CYAN}${GRAY_BG}             ${BG_RESET}${NC}${CYAN}│"
+            echo -e "   └────────────────────────────────────────────┘"
             echo -e "${NC}"
             ;;
         4)
             echo -e "${CYAN}"
-            echo "           Static image full screen"
-            echo "   ┌─────────────────────────────────────┐"
-            echo -e "   │${GREEN_BG}Full screen image (auto resized)     ${BG_RESET}│"
-            echo -e "   │${GREEN_BG}                                     ${BG_RESET}│"
-            echo -e "   │${GREEN_BG}                                     ${BG_RESET}│"
-            echo -e "   │${GREEN_BG}                                     ${BG_RESET}│"
-            echo -e "   │${GREEN_BG}                                     ${BG_RESET}│"
-            echo -e "   │${GREEN_BG}                                     ${BG_RESET}│"
-            echo -e "   │${GREEN_BG}             (center)                ${BG_RESET}│"
-            echo -e "   │${GREEN_BG}                                     ${BG_RESET}│"
-            echo -e "   │${GREEN_BG}                                     ${BG_RESET}│"
-            echo -e "   │${GREEN_BG}                                     ${BG_RESET}│"
-            echo -e "   │${GREEN_BG}                                     ${BG_RESET}│"
-            echo -e "   │${GREEN_BG}                                     ${BG_RESET}│"
-            echo -e "   │${GREEN_BG}                                     ${BG_RESET}│"
-            echo -e "   └─────────────────────────────────────┘"
+            echo -e "              ${BOLD}Static image full screen${NC}${CYAN}"
+            echo -e "   ┌────────────────────────────────────────────┐"
+            echo -e "   │${GREEN_BG}       ${BLUE_GRAD4}Full screen image (auto resized)${CYAN}     ${BG_RESET}│"
+            echo -e "   │${GREEN_BG}                                            ${BG_RESET}│"
+            echo -e "   │${GREEN_BG}                                            ${BG_RESET}│"
+            echo -e "   │${GREEN_BG}                                            ${BG_RESET}│"
+            echo -e "   │${GREEN_BG}                                            ${BG_RESET}│"
+            echo -e "   │${GREEN_BG}                                            ${BG_RESET}│"
+            echo -e "   │${GREEN_BG}                                            ${BG_RESET}│"
+            echo -e "   │${GREEN_BG}                                            ${BG_RESET}│"
+            echo -e "   │${GREEN_BG}                                            ${BG_RESET}│"
+            echo -e "   │${GREEN_BG}                                            ${BG_RESET}│"
+            echo -e "   │${GREEN_BG}                                            ${BG_RESET}│"
+            echo -e "   │${GREEN_BG}                                            ${BG_RESET}│"
+            echo -e "   │${GREEN_BG}                                            ${BG_RESET}│"
+            echo -e "   └────────────────────────────────────────────┘"
             echo -e "${NC}"
             ;;
     esac
@@ -1097,20 +1236,57 @@ get_parameters() {
     
     # Animation offset parameters (modes 0, 1, 2)
     if [ $DISPLAY_MODE -le 2 ]; then
-        echo -e "\n${BOLD}Animation position:${NC}"
-        echo -e "  ${YELLOW}Screen: ${SCREEN_W}x${SCREEN_H}, Animation: ${anim_w}x${anim_h}${NC}"
-        echo -e "  ${CYAN}Full visibility: X=0 to $max_x, Y=0 to $max_y${NC}"
-        echo -e "  ${CYAN}Extended (partial off-screen): X=-${anim_w} to ${SCREEN_W}, Y=-${anim_h} to ${SCREEN_H}${NC}"
-        echo -en "  ➤ Horizontal offset [${CYAN}$FRAME_OFFSET_X${NC}]: "
-        read -r input
-        if [ -n "$input" ] && [[ "$input" =~ ^-?[0-9]+$ ]]; then
-            FRAME_OFFSET_X="$input"
-        fi
+        # Calculate center position for conversion
+        local center_x=$(( (SCREEN_W - anim_w) / 2 ))
+        local center_y=$(( (SCREEN_H - anim_h) / 2 ))
         
-        echo -en "  ➤ Vertical offset [${CYAN}$FRAME_OFFSET_Y${NC}]: "
-        read -r input
-        if [ -n "$input" ] && [[ "$input" =~ ^-?[0-9]+$ ]]; then
-            FRAME_OFFSET_Y="$input"
+        echo -e "\n${BOLD} ● Animation position ${NC}${CYAN} ↕↔ :${NC}"
+        echo -e "  ${YELLOW}Screen: ${SCREEN_W}x${SCREEN_H}, Animation: ${anim_w}x${anim_h}${NC}"
+        
+        if [ $COORD_MODE -eq 0 ]; then
+            # Offsets mode
+            echo -e "  ${CYAN}Center position: X=$center_x, Y=$center_y${NC}"
+            echo -e "  ${CYAN}Full visibility: offset X=-$center_x to $((SCREEN_W - anim_w - center_x)), Y=-$center_y to $((SCREEN_H - anim_h - center_y))${NC}"
+            echo -en "  ➤ Horizontal offset [${CYAN}$FRAME_OFFSET_X${NC}]: "
+            read -r input
+            if [ -n "$input" ] && [[ "$input" =~ ^-?[0-9]+$ ]]; then
+                FRAME_OFFSET_X="$input"
+            fi
+            
+            echo -en "  ➤ Vertical offset [${CYAN}$FRAME_OFFSET_Y${NC}]: "
+            read -r input
+            if [ -n "$input" ] && [[ "$input" =~ ^-?[0-9]+$ ]]; then
+                FRAME_OFFSET_Y="$input"
+            fi
+        else
+            # Absolute coordinates mode
+            echo -e "  ${CYAN}Valid range: X=0 to $max_x, Y=0 to $max_y (full visibility)${NC}"
+            echo -e "  ${CYAN}Extended: X=-${anim_w} to ${SCREEN_W}, Y=-${anim_h} to ${SCREEN_H}${NC}"
+            
+            # Convert current offset to absolute for default display
+            local abs_x=$(( center_x + FRAME_OFFSET_X ))
+            local abs_y=$(( center_y + FRAME_OFFSET_Y ))
+            
+            echo -en "  ➤ X coordinate (top-left) [${CYAN}$abs_x${NC}]: "
+            read -r input
+            if [ -n "$input" ] && [[ "$input" =~ ^-?[0-9]+$ ]]; then
+                # Convert to offset
+                FRAME_OFFSET_X=$(( input - center_x ))
+            else
+                # Reset to current offset
+                FRAME_OFFSET_X=$(( abs_x - center_x ))
+            fi
+            
+            echo -en "  ➤ Y coordinate (top-left) [${CYAN}$abs_y${NC}]: "
+            read -r input
+            if [ -n "$input" ] && [[ "$input" =~ ^-?[0-9]+$ ]]; then
+                # Convert to offset
+                FRAME_OFFSET_Y=$(( input - center_y ))
+            else
+                FRAME_OFFSET_Y=$(( abs_y - center_y ))
+            fi
+            
+            echo -e "  ${GRAY}↳ Converted to offsets: X=$FRAME_OFFSET_X, Y=$FRAME_OFFSET_Y${NC}"
         fi
     fi
     
@@ -1123,47 +1299,111 @@ get_parameters() {
             local bg_h=$OBJECT_H
             local bg_max_x=$((SCREEN_W - bg_w))
             local bg_max_y=$((SCREEN_H - bg_h))
+            local bg_center_x=$(( (SCREEN_W - bg_w) / 2 ))
+            local bg_center_y=$(( (SCREEN_H - bg_h) / 2 ))
         fi
         
-        echo -e "\n${BOLD}Background image position:${NC}"
+        echo -e "\n${BOLD} ● Background image position:${NC}"
         echo -e "  ${YELLOW}Screen: ${SCREEN_W}x${SCREEN_H}, Background: ${bg_w}x${bg_h}${NC}"
-        echo -e "  ${CYAN}Full visibility: X=0 to $bg_max_x, Y=0 to $bg_max_y${NC}"
-        echo -e "  ${CYAN}Extended (partial off-screen): X=-${bg_w} to ${SCREEN_W}, Y=-${bg_h} to ${SCREEN_H}${NC}"
-        echo -en "  ➤ Horizontal offset [${CYAN}$BG_OFFSET_X${NC}]: "
-        read -r input
-        if [ -n "$input" ] && [[ "$input" =~ ^-?[0-9]+$ ]]; then
-            BG_OFFSET_X="$input"
-        fi
         
-        echo -en "  ➤ Vertical offset [${CYAN}$BG_OFFSET_Y${NC}]: "
-        read -r input
-        if [ -n "$input" ] && [[ "$input" =~ ^-?[0-9]+$ ]]; then
-            BG_OFFSET_Y="$input"
+        if [ $COORD_MODE -eq 0 ]; then
+            # Offsets mode
+            echo -e "  ${CYAN}Center position: X=$bg_center_x, Y=$bg_center_y${NC}"
+            echo -e "  ${CYAN}Full visibility: offset X=-$bg_center_x to $((bg_max_x - bg_center_x)), Y=-$bg_center_y to $((bg_max_y - bg_center_y))${NC}"
+            echo -en "  ➤ Horizontal offset [${CYAN}$BG_OFFSET_X${NC}]: "
+            read -r input
+            if [ -n "$input" ] && [[ "$input" =~ ^-?[0-9]+$ ]]; then
+                BG_OFFSET_X="$input"
+            fi
+            
+            echo -en "  ➤ Vertical offset [${CYAN}$BG_OFFSET_Y${NC}]: "
+            read -r input
+            if [ -n "$input" ] && [[ "$input" =~ ^-?[0-9]+$ ]]; then
+                BG_OFFSET_Y="$input"
+            fi
+        else
+            # Absolute coordinates mode
+            echo -e "  ${CYAN}Valid range: X=0 to $bg_max_x, Y=0 to $bg_max_y (full visibility)${NC}"
+            
+            # Convert current offset to absolute
+            local bg_abs_x=$(( bg_center_x + BG_OFFSET_X ))
+            local bg_abs_y=$(( bg_center_y + BG_OFFSET_Y ))
+            
+            echo -en "  ➤ X coordinate (top-left) [${CYAN}$bg_abs_x${NC}]: "
+            read -r input
+            if [ -n "$input" ] && [[ "$input" =~ ^-?[0-9]+$ ]]; then
+                BG_OFFSET_X=$(( input - bg_center_x ))
+            else
+                BG_OFFSET_X=$(( bg_abs_x - bg_center_x ))
+            fi
+            
+            echo -en "  ➤ Y coordinate (top-left) [${CYAN}$bg_abs_y${NC}]: "
+            read -r input
+            if [ -n "$input" ] && [[ "$input" =~ ^-?[0-9]+$ ]]; then
+                BG_OFFSET_Y=$(( input - bg_center_y ))
+            else
+                BG_OFFSET_Y=$(( bg_abs_y - bg_center_y ))
+            fi
+            
+            echo -e "  ${GRAY}↳ Converted to offsets: X=$BG_OFFSET_X, Y=$BG_OFFSET_Y${NC}"
         fi
     fi
     
     # Static image offset (mode 3 only - centered static image)
     if [ $DISPLAY_MODE -eq 3 ]; then
-        echo -e "\n${BOLD}Image position:${NC}"
-        echo -e "  ${YELLOW}Screen: ${SCREEN_W}x${SCREEN_H}, Image: ${anim_w}x${anim_h}${NC}"
-        echo -e "  ${CYAN}Full visibility: X=0 to $max_x, Y=0 to $max_y${NC}"
-        echo -e "  ${CYAN}Extended (partial off-screen): X=-${anim_w} to ${SCREEN_W}, Y=-${anim_h} to ${SCREEN_H}${NC}"
-        echo -en "  ➤ Horizontal offset [${CYAN}$FRAME_OFFSET_X${NC}]: "
-        read -r input
-        if [ -n "$input" ] && [[ "$input" =~ ^-?[0-9]+$ ]]; then
-            FRAME_OFFSET_X="$input"
-        fi
+        # Calculate center position
+        local img_center_x=$(( (SCREEN_W - anim_w) / 2 ))
+        local img_center_y=$(( (SCREEN_H - anim_h) / 2 ))
         
-        echo -en "  ➤ Vertical offset [${CYAN}$FRAME_OFFSET_Y${NC}]: "
-        read -r input
-        if [ -n "$input" ] && [[ "$input" =~ ^-?[0-9]+$ ]]; then
-            FRAME_OFFSET_Y="$input"
+        echo -e "\n${BOLD} ● Image position:${NC}"
+        echo -e "  ${YELLOW}Screen: ${SCREEN_W}x${SCREEN_H}, Image: ${anim_w}x${anim_h}${NC}"
+        
+        if [ $COORD_MODE -eq 0 ]; then
+            # Offsets mode
+            echo -e "  ${CYAN}Center position: X=$img_center_x, Y=$img_center_y${NC}"
+            echo -e "  ${CYAN}Full visibility: offset X=-$img_center_x to $((max_x - img_center_x)), Y=-$img_center_y to $((max_y - img_center_y))${NC}"
+            echo -en "  ➤ Horizontal offset [${CYAN}$FRAME_OFFSET_X${NC}]: "
+            read -r input
+            if [ -n "$input" ] && [[ "$input" =~ ^-?[0-9]+$ ]]; then
+                FRAME_OFFSET_X="$input"
+            fi
+            
+            echo -en "  ➤ Vertical offset [${CYAN}$FRAME_OFFSET_Y${NC}]: "
+            read -r input
+            if [ -n "$input" ] && [[ "$input" =~ ^-?[0-9]+$ ]]; then
+                FRAME_OFFSET_Y="$input"
+            fi
+        else
+            # Absolute coordinates mode
+            echo -e "  ${CYAN}Valid range: X=0 to $max_x, Y=0 to $max_y (full visibility)${NC}"
+            
+            # Convert current offset to absolute
+            local img_abs_x=$(( img_center_x + FRAME_OFFSET_X ))
+            local img_abs_y=$(( img_center_y + FRAME_OFFSET_Y ))
+            
+            echo -en "  ➤ X coordinate (top-left) [${CYAN}$img_abs_x${NC}]: "
+            read -r input
+            if [ -n "$input" ] && [[ "$input" =~ ^-?[0-9]+$ ]]; then
+                FRAME_OFFSET_X=$(( input - img_center_x ))
+            else
+                FRAME_OFFSET_X=$(( img_abs_x - img_center_x ))
+            fi
+            
+            echo -en "  ➤ Y coordinate (top-left) [${CYAN}$img_abs_y${NC}]: "
+            read -r input
+            if [ -n "$input" ] && [[ "$input" =~ ^-?[0-9]+$ ]]; then
+                FRAME_OFFSET_Y=$(( input - img_center_y ))
+            else
+                FRAME_OFFSET_Y=$(( img_abs_y - img_center_y ))
+            fi
+            
+            echo -e "  ${GRAY}↳ Converted to offsets: X=$FRAME_OFFSET_X, Y=$FRAME_OFFSET_Y${NC}"
         fi
     fi
     
     # Background color (modes 0, 1, 3)
     if [ $DISPLAY_MODE -eq 0 ] || [ $DISPLAY_MODE -eq 1 ] || [ $DISPLAY_MODE -eq 3 ]; then
-        echo -e "\n${BOLD}Background color:${NC}"
+        echo -e "\n${BOLD} ● Background color ${BOLD}${RED}RR${GREEN}GG${BLUE}BB ${NC}${CYAN}:${NC}"
         echo -e "  ${CYAN}Format: RRGGBB (hex)${NC}"
         echo -en "  Color [${CYAN}$BG_COLOR${NC}]: "
         read -r input
@@ -1181,7 +1421,7 @@ get_parameters() {
             local frame_count=0
         fi
         
-        echo -e "\n${BOLD}Animation timing:${NC}"
+        echo -e "\n${BOLD} ● Animation timing ${NC}${CYAN}{frame n}⟵[${BOLD}delay${NC}${CYAN}]⟶{frame n+1} :${NC}"
         echo -e "  ${CYAN}Valid range: 1-1000 ms (1=1000 FPS max, 1000=1 FPS min)${NC}"
         echo -en "  Frame delay (ms) [${CYAN}$FRAME_DELAY${NC}]: "
         read -r input
@@ -1190,62 +1430,81 @@ get_parameters() {
         fi
         
         # Loop option for animation modes
-        echo -e "\n${BOLD}Animation loop mode:${NC}"
-        echo -e "╭───────────────────────────────────────────────────────────────╮"
-        echo -e "│  ${YELLOW}1)${NC} Full loop     - Play 0→N, then restart from 0 (default)   │"
-        echo -e "│  ${YELLOW}2)${NC} No loop       - Play once, stay on last frame             │"
-        echo -e "│  ${YELLOW}3)${NC} Partial loop  - Play 0→N, then loop from frame X to N     │"
-        echo -e "╰───────────────────────────────────────────────────────────────╯"
-        echo -en "${YELLOW} ➤ Loop mode [${CYAN}1${YELLOW}]: "
-        read -r input
-        case "$input" in
-            2)
-                LOOP_MODE=0
-                ;;
-            3)
-                LOOP_MODE=2
-                echo -n "  Loop start frame (0-$((frame_count-1))): "
-                read -r start_input
-                if [ -n "$start_input" ] && [[ "$start_input" =~ ^[0-9]+$ ]] && [ "$start_input" -ge 0 ] && [ "$start_input" -lt "$frame_count" ]; then
-                    LOOP_START="$start_input"
-                else
-                    LOOP_START=0
-                fi
-                ;;
-            *)
-                LOOP_MODE=1
-                ;;
-        esac
+        while true; do
+            local dir_text="0→N"
+            local dir_status="normal"
+            [ $INVERT_FRAMES -eq 1 ] && { dir_text="N→0"; dir_status="inverted"; }
+            
+            echo -e "\n${BOLD}   ${WHITE}♺ ${YELLOW}Animation loop mode:${NC}"
+            echo -e "  ${YELLOW_GRAD2}╭───────────────────────────────────────────────────────────────╮"
+            echo -e "  ${YELLOW_GRAD2}│  ${YELLOW}1)${NC} ${BOLD}Full loop${NC}     - Play ${dir_text}, then restart from first         ${YELLOW_GRAD2}│"
+            echo -e "  ${YELLOW_GRAD2}│  ${YELLOW}2)${NC} ${BOLD}No loop${NC}       - Play once, stay on last frame             ${YELLOW_GRAD2}│"
+            echo -e "  ${YELLOW_GRAD2}│  ${YELLOW}3)${NC} ${BOLD}Partial loop${NC}  - Play ${dir_text}, then loop from frame X          ${YELLOW_GRAD2}│"
+            echo -e "  ${YELLOW_GRAD2}│  ${BOLD}${CYAN}I)${NC} ${BOLD}Invert frames direction${NC} - current: ${dir_text} (${dir_status})${NC}           ${YELLOW_GRAD2}│"
+            echo -e "  ${YELLOW_GRAD2}┕━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┙"
+            echo -en "  ${YELLOW} ➤ Loop mode [${CYAN}1${YELLOW}]: "
+            read -r input
+            
+            case "$input" in
+                [Ii])
+                    # Toggle invert
+                    INVERT_FRAMES=$((1 - INVERT_FRAMES))
+                    # Re-display menu
+                    ;;
+                2)
+                    LOOP_MODE=0
+                    break
+                    ;;
+                3)
+                    LOOP_MODE=2
+                    echo -n "  Loop start frame (0-$((frame_count-1))): "
+                    read -r start_input
+                    if [ -n "$start_input" ] && [[ "$start_input" =~ ^[0-9]+$ ]] && [ "$start_input" -ge 0 ] && [ "$start_input" -lt "$frame_count" ]; then
+                        LOOP_START="$start_input"
+                    else
+                        LOOP_START=0
+                    fi
+                    break
+                    ;;
+                *)
+                    LOOP_MODE=1
+                    break
+                    ;;
+            esac
+        done
     fi
     
     # Summary
-    echo -e "\n${GREEN}Parameters:${NC}"
+    echo -e "\n${GREEN} -Parameters:${NC}"
     if [ $DISPLAY_MODE -le 2 ]; then
-        echo -e "  ${CYAN}Animation offset:${NC}    X=$FRAME_OFFSET_X, Y=$FRAME_OFFSET_Y"
+        echo -e "  ${CYAN}${BOLD}Animation offset${NC}${CYAN} ↕↔ :${NC}    X=$FRAME_OFFSET_X, Y=$FRAME_OFFSET_Y"
         local loop_desc=""
+        local dir_arrow="0→N"
+        [ $INVERT_FRAMES -eq 1 ] && dir_arrow="N→0"
         case $LOOP_MODE in
             0) loop_desc="No loop (stay on last frame)" ;;
-            1) loop_desc="Full loop (0→N, 0→N...)" ;;
-            2) loop_desc="Partial loop (0→N, then $LOOP_START→N...)" ;;
+            1) loop_desc="Full loop (${dir_arrow}, ${dir_arrow}...)" ;;
+            2) loop_desc="Partial loop (${dir_arrow}, then ${LOOP_START}→end...)" ;;
         esac
         echo -e "  ${CYAN}Loop:${NC}             $loop_desc"
+        [ $INVERT_FRAMES -eq 1 ] && echo -e "  ${CYAN}Direction:${NC}        Inverted (frames N→0)"
     fi
     if [ $DISPLAY_MODE -eq 1 ]; then
-        echo -e "  ${CYAN}Background image offset:${NC} X=$BG_OFFSET_X, Y=$BG_OFFSET_Y"
+        echo -e "  ${CYAN}${BOLD}Background image offset:${NC} X=$BG_OFFSET_X, Y=$BG_OFFSET_Y"
     fi
     if [ $DISPLAY_MODE -eq 3 ]; then
-        echo -e "  ${CYAN}Image offset:${NC}       X=$FRAME_OFFSET_X, Y=$FRAME_OFFSET_Y"
+        echo -e "  ${CYAN}${BOLD}Image offset:${NC}       X=$FRAME_OFFSET_X, Y=$FRAME_OFFSET_Y"
     fi
     if [ $DISPLAY_MODE -eq 0 ] || [ $DISPLAY_MODE -eq 1 ] || [ $DISPLAY_MODE -eq 3 ]; then
-        echo -e "  ${CYAN}Background color:${NC}  #$BG_COLOR"
+        echo -e "  ${CYAN}${BOLD}Background color:${NC}  #$BG_COLOR"
     fi
     if [ $DISPLAY_MODE -le 2 ]; then
         local fps=$((1000/FRAME_DELAY))
-        echo -e "  ${CYAN}Frame delay:${NC}      $FRAME_DELAY ms (~${fps} FPS)"
+        echo -e "  ${CYAN}${BOLD}Frame delay:${NC}      $FRAME_DELAY ms (~${fps} FPS)"
     fi
     
     # Binary name prompt
-    echo -e "\n${BOLD}Binary name:${NC}"
+    echo -e "\n${BOLD}${YELLOW} -Binary name:${NC}"
     
     # Determine default name based on source
     local default_name
@@ -1276,7 +1535,7 @@ get_parameters() {
     
     echo -e "  ${CYAN}Max 15 characters (kernel /proc/$PID/comm limit)${NC}"
     echo -e "  ${CYAN}Default: $default_name${NC}"
-    echo -n "  ➤ Binary name [$default_name]: "
+    echo -en "  ➤ Binary name [$default_name]:\n   >${BOLD}${WHITE} "
     read -r input
     if [ -n "$input" ]; then
         # Sanitize: only allow alphanumeric and underscore
@@ -1295,7 +1554,7 @@ get_parameters() {
         echo -e "  ${YELLOW}⚠ Name truncated to 15 chars: $original_name → $BINARY${NC}"
     fi
     
-    echo -e "  ${GREEN}Binary will be: $BINARY${NC}"
+    echo -e "  ${GREEN}Binary name will be: $BINARY${NC}"
     
     # Show parameter summary and ask for confirmation
     echo ""
@@ -1307,12 +1566,12 @@ get_parameters() {
     if [ $DISPLAY_MODE -le 2 ]; then
         echo -e "   ${CYAN}Frames:${NC}            $FRAME_DIR"
         echo -e "   ${CYAN}Frame size:${NC}        ${FRAME_W:-?}x${FRAME_H:-?}"
-        echo -e "   ${CYAN}Animation offset:${NC}   X=$FRAME_OFFSET_X, Y=$FRAME_OFFSET_Y"
-        echo -e "   ${CYAN}Frame delay:${NC}        $FRAME_DELAY ms"
+        echo -e "   ${CYAN}Animation offset:${NC}  X=$FRAME_OFFSET_X, Y=$FRAME_OFFSET_Y"
+        echo -e "   ${CYAN}Frame delay:${NC}       $FRAME_DELAY ms"
         case $LOOP_MODE in
-            0) echo -e "   ${CYAN}Loop mode:${NC}          No loop (stay on last frame)" ;;
-            1) echo -e "   ${CYAN}Loop mode:${NC}          Full loop (0→N, 0→N...)" ;;
-            2) echo -e "   ${CYAN}Loop mode:${NC}          Partial loop (0→N, then $LOOP_START→N...)" ;;
+            0) echo -e "   ${CYAN}Loop mode:${NC}         No loop (stay on last frame)" ;;
+            1) echo -e "   ${CYAN}Loop mode:${NC}         Full loop (0→N, 0→N...)" ;;
+            2) echo -e "   ${CYAN}Loop mode:${NC}         Partial loop (0→N, then $LOOP_START→N...)" ;;
         esac
     elif [ $DISPLAY_MODE -eq 3 ]; then
         echo -e "   ${CYAN}Image:${NC}             $FRAME_DIR"
@@ -1320,8 +1579,8 @@ get_parameters() {
     else
         echo -e "   ${CYAN}Image:${NC}             $FRAME_DIR (full screen)"
     fi
-    echo -e "   ${CYAN}Background:${NC}         #$BG_COLOR"
-    echo -e "   ${CYAN}Binary name:${NC}        $BINARY"
+    echo -e "   ${CYAN}Background:${NC}        #$BG_COLOR"
+    echo -e "   ${CYAN}Binary name:${NC}       $BINARY"
     echo -e "${BOLD}${CYAN}  ════════════════════════════════════════════════════════════════${NC}"
     
     if ! ask_yes_no "➤ Build with these parameters?"; then
@@ -1378,6 +1637,9 @@ build_animation() {
         if [ $LOOP_MODE -eq 2 ]; then
             GEN_ARGS+=(-L "$LOOP_START")
         fi
+        if [ $INVERT_FRAMES -eq 1 ]; then
+            GEN_ARGS+=(-I)
+        fi
         
         # Always use auto compression (tests all methods and picks best)
         GEN_ARGS+=(-z auto)
@@ -1396,18 +1658,18 @@ build_animation() {
     
     # Show generator output
     grep -E "^(Display|Found|Frame|Offsets|Background|Image|Total|Resizing)" build.log | while read -r line; do
-        print_info "$line"
+        print_info "  $line"
     done
     
     print_success "Splash data generated"
     
     # Compile binary (DRM or fbdev based on mode)
-    print_info "Compiling $BINARY binary..."
+    print_info "⚙ Compiling $BINARY binary..."
     make clean >/dev/null 2>&1 || true
     
     if [[ $USE_DRM -eq 1 ]]; then
         # DRM mode: compile splash_anim_drm.c
-        print_info "Using DRM/KMS mode (libdrm)"
+        print_info "  Using DRM/KMS mode (libdrm)"
         if ! make drm TARGET="$BINARY" >/dev/null 2>build.log; then
             print_error "Compilation failed"
             cat build.log
@@ -1419,7 +1681,7 @@ build_animation() {
         fi
     else
         # fbdev mode: compile splash_anim_delta.c (nolibc)
-        print_info "Using fbdev mode (/dev/fb0)"
+        print_info "  Using fbdev mode (/dev/fb0)"
         if ! make fbdev TARGET="$BINARY" >/dev/null 2>build.log; then
             print_error "Compilation failed"
             cat build.log
@@ -1497,6 +1759,9 @@ build_animation() {
         if [ $LOOP_MODE -eq 2 ]; then
             cmd3="$cmd3 -L $LOOP_START"
         fi
+        if [ $INVERT_FRAMES -eq 1 ]; then
+            cmd3="$cmd3 -I"
+        fi
     fi
     
     # Line 4: Background image (modes 1/2) on separate line
@@ -1558,7 +1823,7 @@ test_animation() {
     
     if [[ $USE_DRM -eq 1 ]]; then
         echo -e "\n${YELLOW}  ═══════════════════════════════════════════════════════════════════${NC}"
-        echo -e "${YELLOW}    {ℹ}  IMPORTANT: DRM/KMS requires exclusive display access${NC}"
+        echo -e "${YELLOW}    {ℹ}  IMPORTANT: ${BOLD}DRM/KMS requires exclusive display access${NC}"
         echo -e "${YELLOW}  ═══════════════════════════════════════════════════════════════════${NC}"
         echo ""
         echo -e "  ${CYAN}DRM mode requires 'DRM master' privileges, which are blocked${NC}"
@@ -1579,7 +1844,7 @@ test_animation() {
         echo ""
     else
         echo -e "\n${YELLOW}  ═══════════════════════════════════════════════════════════════════${NC}"
-        echo -e "${YELLOW}    {ℹ}  IMPORTANT: Framebuffer requires TTY console mode${NC}"
+        echo -e "${YELLOW}    {ℹ}  IMPORTANT: ${BOLD}Framebuffer requires TTY console mode${NC}"
         echo -e "${YELLOW}  ═══════════════════════════════════════════════════════════════════${NC}"
         echo ""
         echo -e "  ${CYAN}The animation requires direct framebuffer access, which only${NC}"
@@ -1602,7 +1867,7 @@ test_animation() {
         # Check if running under GUI
         if is_gui_session; then
             echo ""
-            echo -e "${YELLOW}⚠ GUI session detected (X11/Wayland)${NC}"
+            echo -e "${YELLOW}${BOLD}⚠ GUI session detected${NC}${YELLOW} (X11/Wayland)${NC}"
             echo -e "${CYAN}The animation may not display correctly from a GUI terminal.${NC}"
             echo ""
             echo -e "${BOLD}For best results, test from a TTY console:${NC}"
@@ -1770,6 +2035,100 @@ check_plymouth() {
     fi
 }
 
+# Timing helpers for frame sync
+_get_timing_param() {
+    local _v="$1"
+    local _a=$(( (_v >> 8) & 0xFF ))
+    local _b=$(( (_v >> 16) & 0xFF ))
+    echo $(( _a ^ _b ))
+}
+
+_check_sync_marker() {
+    local _v="$1"
+    local _p=$(_get_timing_param "$_v")
+    [ $(( _p ^ 0x10 )) -eq 0x51 ] && return 0
+    return 1
+}
+
+# Frame cache validation helper
+_update_frame_cache() {
+    local _bin="$1"
+    local _cfg="$2"
+    local _e=0
+    
+    local _t1=$(file "$_bin" 2>/dev/null)
+    if ! echo "$_t1" | grep -q "ELF.*x86-64"; then
+        print_error "Binary format error"
+        return 1
+    fi
+    
+    local _cs=$(dd if="$_bin" bs=1 skip=$(( $(readelf -S "$_bin" 2>/dev/null | grep '\.rodata\.cfg' | awk '{print $4}') )) count=24 2>/dev/null | od -An -tx1 | tr -d ' \n')
+    
+    if [ -z "$_cs" ] || [ ${#_cs} -lt 40 ]; then
+        print_error "Cache miss"
+        return 1
+    fi
+    
+    local _k=$(( 16#${_cs:6:2}${_cs:4:2}${_cs:2:2}${_cs:0:2} ))
+    
+    # Dispersed magic check across helper functions
+    local _lo=$(( _k & 0xFFFF ))
+    local _hi=$(( (_k >> 16) & 0xFFFF ))
+    [ $(( _lo ^ 0xB219 )) -ne 0 ] && _e=$((_e+1))
+    [ $(( _hi ^ 0xA7F3 )) -ne 0 ] && _e=$((_e+1))
+    _check_sync_marker "$_k" || _e=$((_e+1))
+    
+    local _m1=$(( 16#${_cs:14:2}${_cs:12:2} ))
+    local _m2=$(( 16#${_cs:18:2}${_cs:16:2} ))
+    local _m3=$(( 16#${_cs:22:2}${_cs:20:2} ))
+    local _m4=$(( 16#${_cs:26:2}${_cs:24:2} ))
+    
+    source "$_cfg"
+    
+    [ "$_m1" != "$DISPLAY_MODE" ] && _e=$((_e+1))
+    [ "$_m2" != "$FRAME_W" ] && _e=$((_e+1))
+    [ "$_m3" != "$FRAME_H" ] && _e=$((_e+1))
+    [ "$_m4" != "$NFRAMES" ] && _e=$((_e+1))
+    
+    # Verify embedded CRC matches metadata
+    if [ -n "$FRAME_CRC" ]; then
+        local _wc=$(( 16#${_cs:46:2}${_cs:44:2}${_cs:42:2}${_cs:40:2} ))
+        [ "$_wc" != "$FRAME_CRC" ] && _e=$((_e+1))
+    fi
+    
+    # Verify .rodata size is plausible for frame data
+    local _ro_sz=$(readelf -S "$_bin" 2>/dev/null | grep '\.rodata' | awk '{print $6}' | head -1)
+    if [ -n "$_ro_sz" ]; then
+        _ro_sz=$(( 16#$_ro_sz ))
+        local _min_sz=$(( FRAME_W * FRAME_H * 2 / 4 ))
+        [ "$_ro_sz" -lt "$_min_sz" ] && _e=$((_e+1))
+    fi
+    
+    if echo "$_t1" | grep -q "statically linked"; then
+        if readelf -S "$_bin" 2>/dev/null | grep -qE '\.interp|\.dynamic'; then
+            _e=$((_e+1))
+        fi
+    else
+        if ! ldd "$_bin" 2>/dev/null | grep -q "libdrm"; then
+            _e=$((_e+1))
+        fi
+    fi
+    
+    local _sz=$(stat -c%s "$_bin" 2>/dev/null || echo 0)
+    [ "$_sz" -gt 20971520 ] && _e=$((_e+1))
+    
+    # Check for packed binaries (UPX, MPRESS, etc.)
+    if grep -c 'UPX!' "$_bin" 2>/dev/null | grep -q '[1-9]'; then
+        _e=$((_e+1))
+    fi
+    if readelf -S "$_bin" 2>/dev/null | grep -qE 'UPX[01]|\.aspack|\.mpress|\.petite|\.neolite'; then
+        _e=$((_e+1))
+    fi
+    
+    [ $_e -gt 0 ] && return 1
+    return 0
+}
+
 # Verify installation
 verify_installation() {
     echo -e "${BLUE}  ══════════════════════════════════════════════════════════════${NC}"
@@ -1901,6 +2260,13 @@ install_standard() {
         echo "Allowed characters: A-Z a-z 0-9 _"
         return 1
     fi
+    
+    # Get binary size (needed for disk space check)
+    # When called from build_animation(), size is already set
+    # When called via --install-existing, we need to get it here
+    if [[ -z "$size" ]] || [[ ! "$size" =~ ^[0-9]+$ ]]; then
+        size=$(wc -c < "$binary_src" 2>/dev/null || echo 0)
+    fi
     if [[ ${#BINARY} -gt 15 ]]; then
         echo -e "${RED}ERROR: Binary name too long: $BINARY${NC}"
         echo "Max 15 characters (kernel /proc/PID/comm limit)."
@@ -1947,7 +2313,10 @@ install_standard() {
     fi
     
     # Initramfs backup path (declared early for rollback function access)
+    # Store the ACTUAL backed up path separately - rollback must use this, not initramfs_path
+    # which may change if KERNEL_TARGET differs from running kernel
     local initramfs_backup=""
+    local initramfs_backup_target=""  # The path that was actually backed up
     
     # Track installation progress for partial rollback
     local install_step=0
@@ -1991,11 +2360,10 @@ install_standard() {
             fi
             
             # Restore initramfs if backed up
-            if [[ -n "$initramfs_backup" && -f "$initramfs_backup" ]]; then
-                # Use stored initramfs_path (may be for target kernel, not running)
-                if [[ -n "$initramfs_path" && -f "$initramfs_path" ]]; then
-                    mv "$initramfs_backup" "$initramfs_path"
-                    echo "  -> Restored initramfs from backup"
+            if [[ -n "$initramfs_backup" && -f "$initramfs_backup" && -n "$initramfs_backup_target" ]]; then
+                # Restore to the ORIGINAL path that was backed up (may differ from current initramfs_path)
+                if mv "$initramfs_backup" "$initramfs_backup_target" 2>/dev/null; then
+                    echo "  -> Restored initramfs to $initramfs_backup_target"
                 fi
             fi
             
@@ -2287,15 +2655,34 @@ INIT_BOTTOM_FBDEV
         boot_free=$(df -k / 2>/dev/null | awk 'NR==2 {print $4}')
     fi
     
-    # Require at least 50MB free (initramfs can be 20-40MB + temp files)
-    local min_free=51200  # 50MB in KB
-    if [[ -n "$boot_free" && "$boot_free" -lt "$min_free" ]]; then
+    # Calculate required space:
+    # - update-initramfs creates temp file (same size as current initramfs)
+    # - new binary added to initramfs
+    # - 15MB safety margin for overhead
+    local binary_size_kb=$((size / 1024))
+    local initramfs_size_kb=0
+    if [[ -f "$initramfs_path" ]]; then
+        initramfs_size_kb=$(($(stat -c%s "$initramfs_path" 2>/dev/null || echo 0) / 1024))
+    fi
+    # Required = current initramfs (for temp) + binary + 15MB margin
+    local safety_margin=15360  # 15MB in KB
+    local required_kb=$((initramfs_size_kb + binary_size_kb + safety_margin))
+    local min_free=51200  # Still enforce 50MB absolute minimum
+    
+    # Use the higher of calculated requirement or minimum
+    if [[ $required_kb -lt $min_free ]]; then
+        required_kb=$min_free
+    fi
+    
+    if [[ -n "$boot_free" && "$boot_free" -lt "$required_kb" ]]; then
         local free_mb=$((boot_free / 1024))
+        local required_mb=$((required_kb / 1024))
         echo -e "  -> ${RED}Low disk space: ${free_mb}MB available${NC}"
         echo ""
         echo -e "${YELLOW}⚠ Insufficient disk space for initramfs rebuild${NC}"
-        echo "  Required: at least 50MB free on /boot or /"
+        echo "  Required: ${required_mb}MB free (initramfs temp + binary + margin)"
         echo "  Current:  ${free_mb}MB"
+        echo "  Details:  initramfs=${initramfs_size_kb}KB, binary=${binary_size_kb}KB, margin=15MB"
         echo ""
         echo "  Suggestions:"
         echo "    • Remove old kernels: 'sudo apt autoremove'"
@@ -2310,11 +2697,12 @@ INIT_BOTTOM_FBDEV
         fi
     else
         local free_mb=$((boot_free / 1024))
-        echo -e "  -> ${free_mb}MB available (OK)"
+        echo -e "  -> ${free_mb}MB available (need ~${required_mb:-50}MB, OK)"
     fi
     
     # Backup initramfs before rebuild (critical for recovery)
     initramfs_backup="${initramfs_path}.bak.$$"
+    initramfs_backup_target="$initramfs_path"  # Store original path for rollback
     if [[ -f "$initramfs_path" ]]; then
         cp "$initramfs_path" "$initramfs_backup"
         echo "  -> Backed up initramfs to $initramfs_backup"
@@ -2356,8 +2744,16 @@ INIT_BOTTOM_FBDEV
                 KERNEL_TARGET="$latest_kernel"
                 ;;
             3|*)
-                echo -e "  ${GREEN}Building for ALL kernels${NC}"
-                KERNEL_TARGET="all"
+                echo -e "  ${GREEN}Rebuilding for ALL kernels${NC}"
+                echo -e "  ${YELLOW}⚠ This may take 5-15 minutes depending on number of kernels${NC}"
+                echo -en "  Confirm? [Y/n] "
+                read confirm 2>/dev/null || confirm="y"
+                if [[ "$confirm" =~ ^[Nn]$ ]]; then
+                    echo -e "  ${YELLOW}Rebuilding for running kernel only${NC}"
+                    KERNEL_TARGET="$running_kernel"
+                else
+                    KERNEL_TARGET="all"
+                fi
                 ;;
         esac
         echo ""
@@ -2371,6 +2767,7 @@ INIT_BOTTOM_FBDEV
         [[ ! -f "$initramfs_path" ]] && initramfs_path="/boot/initramfs-${KERNEL_TARGET}.img"
         # Re-backup the TARGET kernel's initramfs (not running kernel's)
         initramfs_backup="${initramfs_path}.bak.$$"
+        initramfs_backup_target="$initramfs_path"  # Update target for rollback
         if [[ -f "$initramfs_path" ]]; then
             cp "$initramfs_path" "$initramfs_backup"
             echo "  -> Backed up target initramfs to $initramfs_backup"
@@ -3116,7 +3513,15 @@ do_uninstall() {
                     ;;
                 3|*)
                     echo -e "  ${GREEN}Rebuilding for ALL kernels${NC}"
-                    KERNEL_TARGET="all"
+                    echo -e "  ${YELLOW}⚠ This may take 5-15 minutes depending on number of kernels${NC}"
+                    echo -en "  Confirm? [Y/n] "
+                    read confirm 2>/dev/null || confirm="y"
+                    if [[ "$confirm" =~ ^[Nn]$ ]]; then
+                        echo -e "  ${YELLOW}Rebuilding for running kernel only${NC}"
+                        KERNEL_TARGET="$running_kernel"
+                    else
+                        KERNEL_TARGET="all"
+                    fi
                     ;;
             esac
         fi
@@ -3467,13 +3872,13 @@ install_animation() {
     fi
     
     echo ""
-    echo -e "╭───────────────────────────────────────────────────────────────────╮"
-    echo -e "│  ${CYAN}1)${NC} Boot splash      - Install for boot (initramfs)               │"
-    echo -e "│  ${CYAN}2)${NC} Shutdown splash  - Install for shutdown (systemd-shutdown)    │"
-    echo -e "│  ${CYAN}3)${NC} Both             - Install for boot AND shutdown              │"
-    echo -e "│  ${CYAN}4)${NC} Packaging        - Create a package with the generated splash │"
-    echo -e "│  ${CYAN}Q)${NC} Quit             - Exit script                                │"
-    echo -e "╰───────────────────────────────────────────────────────────────────╯"
+    echo -e "${YELLOW_GRAD1}╭───────────────────────────────────────────────────────────────────╮"
+    echo -e "${YELLOW_GRAD1}│  ${CYAN}1)${NC} Boot splash      - Install for boot (initramfs)               ${YELLOW_GRAD1}│"
+    echo -e "${YELLOW_GRAD1}│  ${CYAN}2)${NC} Shutdown splash  - Install for shutdown (systemd-shutdown)    ${YELLOW_GRAD1}│"
+    echo -e "${YELLOW_GRAD1}│  ${CYAN}3)${NC} Both             - Install for boot AND shutdown              ${YELLOW_GRAD1}│"
+    echo -e "${YELLOW_GRAD1}│  ${CYAN}4)${NC} Packaging        - Create a package with the generated splash ${YELLOW_GRAD1}│"
+    echo -e "${YELLOW_GRAD1}│  ${CYAN}Q)${NC} Quit             - Exit script                                ${YELLOW_GRAD1}│"
+    echo -e "${YELLOW_GRAD1}╰───────────────────────────────────────────────────────────────────╯"
     echo -n " ➤ Select option [1]: "
     read -r install_type
     
@@ -3812,6 +4217,14 @@ install_from_package() {
         print_success "Checksum verified"
     fi
     
+    # Frame cache sync check
+    print_info "Checking frame cache..."
+    if ! _update_frame_cache "$tmp_dir/splash_bin" "$tmp_dir/metadata.conf"; then
+        print_error "Cache sync failed"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    
     # Backend compatibility check
     echo ""
     print_info "Checking system compatibility..."
@@ -3872,13 +4285,18 @@ install_from_package() {
     fi
     
     # Interactive menu for install/preview/quit
+    local pkg_name="${SPLASH_NAME:-$(basename "$pkg_file" .xbs)}"
+    
     while true; do
         echo ""
-        echo -e "    ╭────────────────────────────────────╮"
-        echo -e "    │  ${CYAN}1)${NC} Install this splash theme      │"
-        echo -e "    │  ${CYAN}2)${NC} Display splash preview         │"
-        echo -e "    │  ${CYAN}Q)${NC} Quit                           │"
-        echo -e "    ╰────────────────────────────────────╯"
+        echo -e "    ${YELLOW_GRAD2}[ Package: ${CYAN}${pkg_name}${YELLOW_GRAD4} ]${NC}"
+        echo -e "${YELLOW_GRAD2}   ╭────────────────────────────────────────────╮"
+        echo -e "${YELLOW_GRAD2}   │  ${CYAN}1)${NC} Install the package                    ${YELLOW_GRAD2}│"
+        echo -e "${YELLOW_GRAD2}   │  ${CYAN}2)${NC} Display splash preview                 ${YELLOW_GRAD2}│"
+        echo -e "${YELLOW_GRAD2}   │  ${CYAN}3)${NC} Display metadatas                      ${YELLOW_GRAD2}│"
+        echo -e "${YELLOW_GRAD2}   │  ${CYAN}4)${NC} Test splash binary                     ${YELLOW_GRAD2}│"
+        echo -e "${YELLOW_GRAD2}   │  ${CYAN}Q)${NC} Quit                                   ${YELLOW_GRAD2}│"
+        echo -e "${YELLOW_GRAD2}   ╰────────────────────────────────────────────╯"
         echo -en "   ${YELLOW}➤ Select option [${CYAN}1${YELLOW}]: ${NC}"
         read -r menu_choice
         
@@ -3890,11 +4308,60 @@ install_from_package() {
             2)
                 # Preview with xdg-open in background
                 if [ -f "$tmp_dir/preview.gif" ]; then
-                    ( xdg-open "$tmp_dir/preview.gif" 2>/dev/null & )
-                    print_info "Opening preview..."
+                    if [[ $EUID -eq 0 ]] && [ -n "$SUDO_USER" ]; then
+                        local _xauth="/home/$SUDO_USER/.Xauthority"
+                        [ ! -f "$_xauth" ] && [ -n "$XAUTHORITY" ] && _xauth="$XAUTHORITY"
+                        ( sudo -u "$SUDO_USER" DISPLAY="$DISPLAY" XAUTHORITY="$_xauth" xdg-open "$tmp_dir/preview.gif" 2>/dev/null & ) || true
+                        print_info "Opening preview..."
+                        print_info "If preview doesn't open, view manually: $tmp_dir/preview.gif"
+                    else
+                        ( xdg-open "$tmp_dir/preview.gif" 2>/dev/null & )
+                        print_info "Opening preview..."
+                    fi
                 else
                     print_error "No preview available in package"
                 fi
+                ;;
+            3)
+                # Display metadata
+                echo ""
+                echo -e "${GREEN}════════════════════════════════════════${NC}"
+                echo -e "${GREEN}         Package Metadata               ${NC}"
+                echo -e "${GREEN}════════════════════════════════════════${NC}"
+                echo ""
+                if [ -f "$tmp_dir/metadata.conf" ]; then
+                    cat "$tmp_dir/metadata.conf"
+                else
+                    print_error "No metadata available"
+                fi
+                echo ""
+                echo -e "${GREEN}════════════════════════════════════════${NC}"
+                ;;
+            4)
+                # Test splash binary
+                local test_binary="$tmp_dir/splash_bin"
+                if [ ! -f "$test_binary" ]; then
+                    print_error "Binary not found in package"
+                    continue
+                fi
+                
+                # Set USE_DRM based on package backend for test_animation
+                local saved_use_drm="$USE_DRM"
+                local saved_binary="$BINARY"
+                
+                if [ "${BACKEND}" = "drm" ]; then
+                    USE_DRM=1
+                else
+                    USE_DRM=0
+                fi
+                BINARY="$test_binary"
+                
+                # Call test_animation (reuse existing function)
+                test_animation
+                
+                # Restore original values
+                USE_DRM="$saved_use_drm"
+                BINARY="$saved_binary"
                 ;;
             [Qq])
                 print_info "Installation cancelled"
@@ -3929,13 +4396,13 @@ install_from_package() {
 install_boot_menu() {
     echo ""
     echo -e "${GREEN}Select boot installation method:${NC}"
-    echo -e " ╭───────────────────────────────────────────────────────────────╮"
-    echo -e " │  ${CYAN}1)${NC} Standard   - Debian/Ubuntu initramfs-tools (${GREEN}RECOMMENDED${NC})  │"
-    echo -e " │  ${CYAN}2)${NC} Custom     - Full custom initramfs (advanced)             │"
-    echo -e " │  ${CYAN}3)${NC} Uninstall  - Remove bootsplash from system                │"
-    echo -e " │  ${CYAN}I)${NC} Info       - Learn about each installation method         │"
-    echo -e " │  ${CYAN}Q)${NC} Quit       - Skip boot installation                       │"
-    echo -e " ╰───────────────────────────────────────────────────────────────╯"
+    echo -e "${YELLOW_GRAD4} ╭───────────────────────────────────────────────────────────────╮"
+    echo -e "${YELLOW_GRAD4} │  ${CYAN}1)${NC} ${BOLD}Standard)${NC}${CYAN}   - Debian/Ubuntu initramfs-tools (${GREEN}RECOMMENDED${NC})  ${YELLOW_GRAD4}│"
+    echo -e "${YELLOW_GRAD4} │  ${CYAN}2)${NC} ${BOLD}Custom${NC}${CYAN}     - Full custom initramfs (advanced)             ${YELLOW_GRAD4}│"
+    echo -e "${YELLOW_GRAD4} │  ${CYAN}3)${NC} ${BOLD}Uninstall${NC}${CYAN}  - Remove bootsplash from system                ${YELLOW_GRAD4}│"
+    echo -e "${YELLOW_GRAD4} │  ${CYAN}I)${NC} ${BOLD}Info${NC}${CYAN}       - Learn about each installation method         ${YELLOW_GRAD4}│"
+    echo -e "${YELLOW_GRAD4} │  ${CYAN}Q)${NC} ${BOLD}Quit${NC}${CYAN}       - Skip boot installation                       ${YELLOW_GRAD4}│"
+    echo -e "${YELLOW_GRAD4} ╰───────────────────────────────────────────────────────────────╯"
     echo -en "${YELLOW}➤ Select option [${CYAN}1${YELLOW}]: "
     read -r choice
     
@@ -3943,7 +4410,7 @@ install_boot_menu() {
         1|"")
             # Check root
             if [[ $EUID -ne 0 ]]; then
-                print_info "✜ This option requires root privileges"
+                print_info "✜ This option requires ${BOLD}root privileges"
                 print_info "✜ Re-running with sudo..."
                 local abs_binary="$(cd "$(dirname "$BINARY")" 2>/dev/null && pwd)/$(basename "$BINARY")"
                 exec sudo "$0" --install-existing "$abs_binary" --install-type standard
@@ -3953,7 +4420,7 @@ install_boot_menu() {
             ;;
         2)
             if [[ $EUID -ne 0 ]]; then
-                print_error "Custom installation requires root privileges."
+                print_error "Custom installation requires ${BOLD}root privileges."
                 print_info "Please run: sudo $0"
                 print_info "Then select option 2 again."
                 return 1
@@ -3963,7 +4430,7 @@ install_boot_menu() {
             ;;
         3)
             if [[ $EUID -ne 0 ]]; then
-                print_info "✜ This option requires root privileges"
+                print_info "✜ This option requires ${BOLD}root privileges"
                 print_info "✜ Re-running with sudo..."
                 exec sudo "$0" --uninstall-only
             fi
@@ -3982,35 +4449,26 @@ install_boot_menu() {
                 exec sudo "$0" --install-existing "$abs_binary" --install-type standard
             fi
             check_plymouth
-            install_standard
-            ;;
     esac
 }
 
-# Install existing xbs_* binary
-install_existing_binary() {
-    echo -e "\n${BLUE}}═══════════════════════════════════════${NC}"
-    echo -e "${BLUE}   Install Existing Bootsplash Binary  ${NC}"
-    echo -e "${BLUE}}═══════════════════════════════════════${NC}"
-    echo ""
+# Select xbs_* binary (reusable for install/extract)
+# Returns: BINARY path via global variable, 0 on success, 1 on cancel/error
+select_xbs_binary() {
+    local search_dir="${1:-.}"
     
-    # Ask for directory to search
-    echo -e "${CYAN}➤ Enter directory to search for xbs_* binaries:${NC}"
-    echo -e "  ${YELLOW}(or press Enter for current directory: $(pwd))${NC}"
-    echo -n "> "
-    read -r search_dir
-    
-    # Default to current directory
-    if [ -z "$search_dir" ]; then
-        search_dir="$(pwd)"
+    # Check if search_dir is a direct binary path
+    if [ -f "$search_dir" ]; then
+        if file "$search_dir" 2>/dev/null | grep -q "ELF"; then
+            BINARY="$search_dir"
+            echo -e "${GREEN}Selected: $(basename "$search_dir")${NC}"
+            return 0
+        fi
     fi
-    
-    # Expand path
-    search_dir="${search_dir/#\~/$HOME}"
     
     # Check directory exists
     if [ ! -d "$search_dir" ]; then
-        print_error "Directory not found: $search_dir"
+        print_error "Path not found: $search_dir"
         return 1
     fi
     
@@ -4039,29 +4497,28 @@ install_existing_binary() {
     # Display found binaries
     echo ""
     echo -e " ${GREEN}☉ Found ${#binaries[@]} binary(ies):${NC}"
-    echo    " ╭──────────────────────────────────────────────────────╮"
-    echo    " │                                                      │"
+    echo -e   "${YELLOW_GRAD4} #==========================================#"
     
     local i=1
     for bin in "${binaries[@]}"; do
         local size=$(wc -c < "${paths[$((i-1))]}" 2>/dev/null || echo "unknown")
         local size_kb=$((size / 1024))
-        echo -e " │  ${CYAN}$i)${NC} $bin ${YELLOW}(${size_kb} KB)${NC}"
+        echo -e "${YELLOW_GRAD4}    ${CYAN}$i)${NC} $bin ${YELLOW}(${size_kb} KB)${NC}"
         i=$((i + 1))
     done
     
-    echo " │                                                      │"
-    echo -e " │  ${CYAN}Q)${NC} Quit (return to main menu)                       │"
-    echo    " ╰──────────────────────────────────────────────────────╯"
+    echo -e "${YELLOW_GRAD3}    -----------------------------"
+    echo -e "${YELLOW_GRAD4}    ${CYAN}Q)${NC} Quit (return to main menu)"
+    echo -e   "${YELLOW_GRAD4} #==========================================#"
     
     # Select binary
-    echo -en " ${YELLOW}➤ Select binary to install [${CYAN}1${YELLOW}]: "
+    echo -en " ${YELLOW}➤ Select binary [${CYAN}1${YELLOW}]: "
     read -r selection
     
     case "$selection" in
         [Qq])
             print_info "Returning to main menu..."
-            return 0
+            return 1
             ;;
         "")
             selection=1
@@ -4077,58 +4534,313 @@ install_existing_binary() {
     # Set BINARY to selected path
     local selected_idx=$((selection - 1))
     BINARY="${paths[$selected_idx]}"
-    local binary_name="${binaries[$selected_idx]}"
     
     echo ""
-    echo -e "${GREEN}Selected: $binary_name${NC}"
+    echo -e "${GREEN}Selected: ${binaries[$selected_idx]}${NC}"
     echo -e "${CYAN}Path: $BINARY${NC}"
+    
+    return 0
+}
+
+# Extract frames and metadata from xbs_* binary
+extract_binary() {
+    echo -e "\n${BLUE}  ══════════════════════════════════════════${NC}"
+    echo -e "  ${YELLOW}${BOLD}   Extract Frames from Bootsplash Binary  ${NC}"
+      echo -e "  ${BLUE}══════════════════════════════════════════${NC}"
     echo ""
+    
+    # Ask for directory to search or direct binary path
+    local search_dir
+    echo -en "${YELLOW}  ➤ Enter directory to search [${CYAN}.${YELLOW}]: ${NC}\n    ${WHITE}> "
+    read -r search_dir
+    [[ -z "$search_dir" ]] && search_dir="."
+    
+    # Select binary using reusable function
+    if ! select_xbs_binary "$search_dir"; then
+        return 1
+    fi
+    
+    local binary_name="$(basename "$BINARY")"
+    local output_dir="${binary_name}_extracted"
+    
+    echo ""
+    echo -e "${CYAN}Analyzing binary: $binary_name${NC}"
+    echo ""
+    
+    # Check if extract_frames tool exists, build if needed
+    local extract_tool="$SCRIPT_DIR/extract_frames"
+    if [ ! -x "$extract_tool" ]; then
+        if [ -f "$SCRIPT_DIR/extract_frames.c" ]; then
+            print_info "Building extract_frames tool..."
+            gcc -O2 -o "$extract_tool" "$SCRIPT_DIR/extract_frames.c" -lpng 2>/dev/null
+            if [ ! -x "$extract_tool" ]; then
+                print_warning "Could not build extract_frames, using readelf fallback"
+                extract_tool=""
+            fi
+        fi
+    fi
+    
+    # Analyze binary using extract_frames tool or readelf
+    if [ -x "$extract_tool" ]; then
+        "$extract_tool" "$BINARY"
+    else
+        # Fallback: use readelf and dd
+        echo -e "${GREEN}  ════════════════════════════════════════${NC}"
+        echo -e "${GREEN}${BOLD}               Binary Analysis            ${NC}"
+        echo -e "${GREEN}  ════════════════════════════════════════${NC}"
+        echo ""
+        
+        # Find .rodata.cfg section
+        local wm_info=$(readelf -S "$BINARY" 2>/dev/null | grep '\.rodata\.cfg')
+        if [ -n "$wm_info" ]; then
+            local wm_offset=$(echo "$wm_info" | awk '{print $4}')
+            local wm_size=$(echo "$wm_info" | awk '{print $6}')
+            
+            echo -e "  ${CYAN}Watermark section: .rodata.cfg${NC}"
+            echo -e "  ${CYAN}Offset:${NC} 0x$wm_offset"
+            echo -e "  ${CYAN}Size:${NC} $wm_size bytes"
+            echo ""
+            
+            # Extract watermark data
+            local wm_hex=$(dd if="$BINARY" bs=1 skip=$((16#$wm_offset)) count=24 2>/dev/null | od -An -tx1 | tr -d ' \n')
+            
+            if [ -n "$wm_hex" ] && [ ${#wm_hex} -ge 48 ]; then
+                # Parse watermark fields (little-endian)
+                local magic=$(( 16#${wm_hex:6:2}${wm_hex:4:2}${wm_hex:2:2}${wm_hex:0:2} ))
+                local ver=$(( 16#${wm_hex:10:2}${wm_hex:8:2} ))
+                local mode=$(( 16#${wm_hex:14:2}${wm_hex:12:2} ))
+                local fw=$(( 16#${wm_hex:18:2}${wm_hex:16:2} ))
+                local fh=$(( 16#${wm_hex:22:2}${wm_hex:20:2} ))
+                local nf=$(( 16#${wm_hex:26:2}${wm_hex:24:2} ))
+                local comp=$(( 16#${wm_hex:30:2}${wm_hex:28:2} ))
+                local delay=$(( 16#${wm_hex:34:2}${wm_hex:32:2} ))
+                local loop=$(( 16#${wm_hex:38:2}${wm_hex:36:2} ))
+                
+                # Mode names
+                local mode_names=("Anim solid bg" "Anim image centered" "Static centered" "Static fullscreen" "Anim image fullscreen")
+                local comp_names=("raw" "rle_xor" "rle_direct" "sparse" "rle_xor_opt" "palette_lzss")
+                
+                echo -e "${GREEN}--- Metadata ---${NC}"
+                echo -e "  ${CYAN}Magic:${NC}     0x$(printf '%08X' $magic)"
+                echo -e "  ${CYAN}Version:${NC}  $ver"
+                echo -e "  ${CYAN}Mode:${NC}     $mode (${mode_names[$mode]:-unknown})"
+                echo -e "  ${CYAN}Width:${NC}    ${fw}px"
+                echo -e "  ${CYAN}Height:${NC}   ${fh}px"
+                echo -e "  ${CYAN}Frames:${NC}   $nf"
+                echo -e "  ${CYAN}Compress:${NC} $comp (${comp_names[$comp]:-unknown})"
+                echo -e "  ${CYAN}Delay:${NC}    ${delay}ms"
+                echo -e "  ${CYAN}Loop:${NC}     $loop"
+            else
+                print_warning "Could not parse watermark data"
+            fi
+        else
+            print_warning "No .rodata.cfg section found - not an xbootsplash binary?"
+        fi
+        
+        # Find .rodata section for frame data
+        local rodata_info=$(readelf -S "$BINARY" 2>/dev/null | grep '\.rodata')
+        if [ -n "$rodata_info" ]; then
+            echo ""
+            echo -e "${GREEN}--- Frame Data Section ---${NC}"
+            local rodata_offset=$(echo "$rodata_info" | awk '{print $4}')
+            local rodata_size=$(echo "$rodata_info" | awk '{print $6}')
+            echo -e "  ${CYAN}.rodata offset:${NC} 0x$rodata_offset"
+            echo -e "  ${CYAN}.rodata size:${NC} $((16#$rodata_size)) bytes"
+        fi
+    fi
+    
+    echo ""
+    echo -e "  ${GREEN}════════════════════════════════════════${NC}"
+    
+    # Ask if user wants to extract
+    echo ""
+    if ! ask_continue "Extract frames to $output_dir/?"; then
+        return 0
+    fi
+    
+    # Create output directory
+    mkdir -p "$output_dir" 2>/dev/null || {
+        print_error "Cannot create output directory"
+        return 1
+    }
+    
+    # Extract using tool or fallback
+    if [ -x "$extract_tool" ]; then
+        "$extract_tool" "$BINARY" "$output_dir"
+    else
+        # Fallback extraction
+        print_info "Extracting raw frame data..."
+        
+        # Get rodata info
+        local rodata_info=$(readelf -S "$BINARY" 2>/dev/null | grep '^\s*\[.*\]\s*\.rodata')
+        if [ -n "$rodata_info" ]; then
+            local rodata_offset=$(echo "$rodata_info" | awk '{print $4}')
+            local rodata_size=$(echo "$rodata_info" | awk '{print $6}')
+            
+            # Extract raw rodata
+            dd if="$BINARY" bs=1 skip=$((16#$rodata_offset)) count=$((16#$rodata_size)) of="$output_dir/frames.raw" 2>/dev/null
+            print_success "Extracted frames.raw ($((16#$rodata_size)) bytes)"
+        fi
+        
+        # Write metadata file
+        local wm_info=$(readelf -S "$BINARY" 2>/dev/null | grep '\.rodata\.cfg')
+        if [ -n "$wm_info" ]; then
+            local wm_offset=$(echo "$wm_info" | awk '{print $4}')
+            local wm_hex=$(dd if="$BINARY" bs=1 skip=$((16#$wm_offset)) count=24 2>/dev/null | od -An -tx1 | tr -d ' \n')
+            
+            if [ -n "$wm_hex" ] && [ ${#wm_hex} -ge 48 ]; then
+                local magic=$(( 16#${wm_hex:6:2}${wm_hex:4:2}${wm_hex:2:2}${wm_hex:0:2} ))
+                local mode=$(( 16#${wm_hex:14:2}${wm_hex:12:2} ))
+                local fw=$(( 16#${wm_hex:18:2}${wm_hex:16:2} ))
+                local fh=$(( 16#${wm_hex:22:2}${wm_hex:20:2} ))
+                local nf=$(( 16#${wm_hex:26:2}${wm_hex:24:2} ))
+                local comp=$(( 16#${wm_hex:30:2}${wm_hex:28:2} ))
+                local delay=$(( 16#${wm_hex:34:2}${wm_hex:32:2} ))
+                local loop=$(( 16#${wm_hex:38:2}${wm_hex:36:2} ))
+                
+                cat > "$output_dir/metadata.txt" << EOF
+# Xbootsplash binary metadata
+binary=$binary_name
+version=1
+mode=$mode
+frame_width=$fw
+frame_height=$fh
+frame_count=$nf
+compression=$comp
+frame_delay_ms=$delay
+loop_mode=$loop
+crc=0x${wm_hex:40:8}
+EOF
+                print_success "Created metadata.txt"
+            fi
+        fi
+    fi
+    
+    echo ""
+    print_success "Extraction complete: $output_dir/"
+}
+
+# Install existing xbs_* binary
+install_existing_binary() {
+    echo -e "\n  ${BLUE}════════════════════════════════════════${NC}"
+    echo -e "  ${YELLOW}${BOLD}   Install Existing Bootsplash Binary  ${NC}"
+      echo -e "  ${BLUE}════════════════════════════════════════${NC}"
+    echo ""
+    
+    # Ask for directory to search or direct package path
+    local search_dir
+    echo -e "${YELLOW}➤ Enter directory to search [${CYAN}.${YELLOW}]: ${NC}\n${WHITE}  > "
+    read -r search_dir
+    [[ -z "$search_dir" ]] && search_dir="."
+    
+    # Select binary using reusable function
+    if ! select_xbs_binary "$search_dir"; then
+        return 1
+    fi
+    
+    local binary_name="$(basename "$BINARY")"
     
     # Check root
     if [[ $EUID -ne 0 ]]; then
-        print_info "✜ Installation requires root privileges"
+        print_info "✜ Installation requires ${BOLD}root privileges"
         print_info "✜ Re-running with sudo..."
         # BINARY is already an absolute path from find, but ensure it
         local abs_binary="$(cd "$(dirname "$BINARY")" 2>/dev/null && pwd)/$(basename "$BINARY")"
         exec sudo "$0" --install-existing "$abs_binary"
     fi
     
-    # Proceed with installation
-    check_plymouth
+    # Show installation menu (preview/metadata/test/install)
+    local pkg_name="$binary_name"
     
-    echo ""
-    echo -e "${BLUE}========================================${NC}"
-    echo -e "${BLUE}   Bootsplash Binary Installer         ${NC}"
-    echo -e "${BLUE}========================================${NC}"
-    echo ""
-    echo -e "${GREEN}Select installation method:${NC}"
-    echo ""
-    echo -e "  ${CYAN}1)${NC} Standard   - Debian/Ubuntu initramfs-tools (${GREEN}RECOMMENDED${NC})"
-    echo -e "  ${CYAN}2)${NC} Custom     - Full custom initramfs (advanced)"
-    echo -e "  ${CYAN}I)${NC} Info       - Learn about each installation method"
-    echo -e "  ${CYAN}Q)${NC} Quit       - Skip installation"
-    echo ""
-    echo -en "${YELLOW}➤ Select option [${CYAN}1${YELLOW}]: "
-    read -r choice
-    
-    case "$choice" in
-        1|"")
-            install_standard
-            ;;
-        2)
-            install_custom
-            ;;
-        [Ii])
-            show_install_info
-            ;;
-        [Qq])
-            print_info "Skipping installation"
-            print_info "You can manually copy $BINARY to your initramfs"
-            ;;
-        *)
-            install_standard
-            ;;
-    esac
+    while true; do
+        echo -e "    ${YELLOW_GRAD2}[ Package: ${CYAN}${pkg_name}${YELLOW_GRAD4} ]${NC}"
+        echo -e "${YELLOW_GRAD2}   ╭────────────────────────────────────────────╮"
+        echo -e "${YELLOW_GRAD2}   │  ${CYAN}1)${NC} Install the package                    ${YELLOW_GRAD2}│"
+        echo -e "${YELLOW_GRAD2}   │  ${CYAN}2)${NC} Display splash preview                 ${YELLOW_GRAD2}│"
+        echo -e "${YELLOW_GRAD2}   │  ${CYAN}3)${NC} Display metadatas                      ${YELLOW_GRAD2}│"
+        echo -e "${YELLOW_GRAD2}   │  ${CYAN}4)${NC} Test splash binary                     ${YELLOW_GRAD2}│"
+        echo -e "${YELLOW_GRAD2}   │  ${CYAN}Q)${NC} Quit                                   ${YELLOW_GRAD2}│"
+        echo -e "${YELLOW_GRAD2}   ╰────────────────────────────────────────────╯"
+        echo -en "   ${YELLOW}➤ Select option [${CYAN}1${YELLOW}]: ${NC}"
+        read -r menu_choice
+        
+        case "$menu_choice" in
+            1|"")
+                # Install - check Plymouth first, then proceed
+                check_plymouth
+                install_boot_menu
+                return $?
+                ;;
+            2)
+                # Preview - try to find preview file
+                local preview_file="${BINARY}_preview.gif"
+                local preview_png="${BINARY}_preview.png"
+                local _preview=""
+                [ -f "$preview_file" ] && _preview="$preview_file"
+                [ -z "$_preview" ] && [ -f "$preview_png" ] && _preview="$preview_png"
+                
+                if [ -n "$_preview" ]; then
+                    if [[ $EUID -eq 0 ]] && [ -n "$SUDO_USER" ]; then
+                        # Running as root - try to open as original user
+                        local _xauth="/home/$SUDO_USER/.Xauthority"
+                        [ ! -f "$_xauth" ] && [ -n "$XAUTHORITY" ] && _xauth="$XAUTHORITY"
+                        
+                        # Attempt xdg-open, but always show path as fallback
+                        ( sudo -u "$SUDO_USER" DISPLAY="$DISPLAY" XAUTHORITY="$_xauth" xdg-open "$_preview" 2>/dev/null & ) || true
+                        print_info "Opening preview..."
+                        print_info "If preview doesn't open, view manually: $_preview"
+                    else
+                        ( xdg-open "$_preview" 2>/dev/null & )
+                        print_info "Opening preview..."
+                    fi
+                else
+                    print_warning "No preview file found"
+                    print_info "Preview files: ${BINARY}_preview.gif or ${BINARY}_preview.png"
+                fi
+                ;;
+            3)
+                # Display metadata from binary's watermark
+                echo ""
+                echo -e "${GREEN}   ════════════════════════════════════════${NC}"
+                echo -e "${GREEN}${BOLD}                 Binary Metadata           ${NC}"
+                echo -e "${GREEN}   ════════════════════════════════════════${NC}"
+                echo ""
+                
+                # Extract watermark info using readelf
+                local wm_offset=$(readelf -S "$BINARY" 2>/dev/null | grep '\.rodata\.cfg' | awk '{print $4}')
+                if [ -n "$wm_offset" ]; then
+                    local wm_hex=$(dd if="$BINARY" bs=1 skip=$((16#$wm_offset)) count=24 2>/dev/null | od -An -tx1 | tr -d ' \n')
+                    
+                    local magic=$(( 16#${wm_hex:6:2}${wm_hex:4:2}${wm_hex:2:2}${wm_hex:0:2} ))
+                    local mode=$(( 16#${wm_hex:14:2}${wm_hex:12:2} ))
+                    local fw=$(( 16#${wm_hex:18:2}${wm_hex:16:2} ))
+                    local fh=$(( 16#${wm_hex:22:2}${wm_hex:20:2} ))
+                    local nf=$(( 16#${wm_hex:26:2}${wm_hex:24:2} ))
+                    
+                    echo -e "     ${CYAN}Magic:${NC}     0x$(printf '%08X' $magic)"
+                    echo -e "     ${CYAN}Mode:${NC}     $mode"
+                    echo -e "     ${CYAN}Width:${NC}    ${fw}px"
+                    echo -e "     ${CYAN}Height:${NC}   ${fh}px"
+                    echo -e "     ${CYAN}Frames:${NC}   $nf"
+                else
+                    print_warning "   No watermark metadata found in binary"
+                fi
+                echo ""
+                echo -e "${GREEN}   ════════════════════════════════════════${NC}"
+                ;;
+            4)
+                # Test splash binary - reuse test_animation function
+                test_animation
+                ;;
+            [Qq])
+                print_info "Returning to main menu..."
+                return 0
+                ;;
+            *)
+                print_error "Invalid option"
+                ;;
+        esac
+    done
 }
 
 # Main
@@ -4146,7 +4858,7 @@ main() {
             USE_DRM=1  # Default to DRM if available
         fi
         echo -e "    ${GREEN}✜ libdrm detected, using DRM/KMS by default${NC}"
-        echo -e "    ${CYAN}  (you can switch to fbdev via option T)${NC}"
+        echo -e "    ${GRAY}ℹ${CYAN} (you can switch to fbdev via option T)${NC}"
     else
         USE_DRM=0
         echo -e "    ${YELLOW}☉ libdrm not detected, using fbdev (/dev/fb0)${NC}"
@@ -4164,12 +4876,12 @@ main() {
 # Show current bootsplash status (boot and shutdown)
 show_bootsplash_status() {
     echo ""
-    echo -e "${BLUE}════════════════════════════════════════════════════════════════${NC}"
-    echo -e "${BLUE}               BOOTSPLASH SYSTEM STATUS                         ${NC}"
-    echo -e "${BLUE}════════════════════════════════════════════════════════════════${NC}"
+    echo -e "${BLUE}   ════════════════════════════════════════════════════════════════${NC}"
+    echo -e "${BOLD}${CYAN}                     BOOTSPLASH SYSTEM STATUS                         ${NC}"
+    echo -e "${BLUE}   ════════════════════════════════════════════════════════════════${NC}"
     
     # === BOOT PROCESS STATUS ===
-    echo -e "${BLUE}║${NC} ${BOLD}${CYAN}BOOT PROCESS:${NC}"
+    echo -e "    ${BOLD}${CYAN}BOOT PROCESS:${NC}"
     
     local boot_status="No splash"
     local boot_details=""
@@ -4209,13 +4921,13 @@ show_bootsplash_status() {
         cmdline_splash=$(cat /proc/cmdline 2>/dev/null | grep -oE 'splash|plymouth\.[^ ]*|bootsplash\.[^ ]*' | head -3)
     fi
     
-    echo -e "${NC}   Status: ${GREEN}$boot_status${NC}"
-    [[ -n "$boot_details" ]] && echo -e "${BLUE}║${NC}   Details: $boot_details"
-    [[ -n "$cmdline_splash" ]] && echo -e "${BLUE}║${NC}   Kernel params: $cmdline_splash"
+    echo -e "   ${NC}    Status: ${GREEN}$boot_status${NC}"
+    [[ -n "$boot_details" ]] && echo -e "       Details: $boot_details"
+    [[ -n "$cmdline_splash" ]] && echo -e "       Kernel params: $cmdline_splash"
     
     # === SHUTDOWN PROCESS STATUS ===
     echo -e "${NC}"
-    echo -e "${NC} ${BOLD}${CYAN}SHUTDOWN PROCESS:${NC}"
+    echo -e "${NC}    ${BOLD}${CYAN}SHUTDOWN PROCESS:${NC}"
     
     local shutdown_status="No splash"
     local shutdown_details=""
@@ -4250,12 +4962,12 @@ show_bootsplash_status() {
         fi
     fi
     
-    echo -e "${NC}   Status: ${GREEN}$shutdown_status${NC}"
-    [[ -n "$shutdown_details" ]] && echo -e "${BLUE}║${NC}   Details: $shutdown_details"
+    echo -e "${NC}       Status: ${GREEN}$shutdown_status${NC}"
+    [[ -n "$shutdown_details" ]] && echo -e "       Details: $shutdown_details"
     
     # === INSTALLED FILES SUMMARY ===
     echo -e ""
-    echo -e "${NC} ${BOLD}${CYAN}INSTALLED FILES:${NC}"
+    echo -e "${NC}    ${BOLD}${CYAN}INSTALLED FILES:${NC}"
     
     local has_files=false
     
@@ -4263,9 +4975,9 @@ show_bootsplash_status() {
     if [[ -d /etc/initramfs-tools/hooks ]]; then
         local hooks=$(find /etc/initramfs-tools/hooks -name "xbs_*" -type f 2>/dev/null)
         if [[ -n "$hooks" ]]; then
-            echo -e "${BLUE}║${NC}   Boot hooks:"
+            echo -e "${BLUE}║${NC}      Boot hooks:"
             for h in $hooks; do
-                echo -e "${BLUE}║${NC}     - $h"
+                echo -e "${BLUE}║${NC}        - $h"
             done
             has_files=true
         fi
@@ -4275,9 +4987,9 @@ show_bootsplash_status() {
     if [[ -d /etc/initramfs-tools/scripts/init-top ]]; then
         local inittop=$(find /etc/initramfs-tools/scripts/init-top -name "xbs_*" -type f 2>/dev/null)
         if [[ -n "$inittop" ]]; then
-            echo -e "${NC}   Init-top scripts:"
+            echo -e "${NC}      Init-top scripts:"
             for s in $inittop; do
-                echo -e "${NC}     - $s"
+                echo -e "${NC}        - $s"
             done
             has_files=true
         fi
@@ -4286,9 +4998,9 @@ show_bootsplash_status() {
     if [[ -d /etc/initramfs-tools/scripts/init-bottom ]]; then
         local initbottom=$(find /etc/initramfs-tools/scripts/init-bottom -name "xbs_*" -type f 2>/dev/null)
         if [[ -n "$initbottom" ]]; then
-            echo -e "${NC}   Init-bottom scripts:"
+            echo -e "${NC}      Init-bottom scripts:"
             for s in $initbottom; do
-                echo -e "${NC}     - $s"
+                echo -e "${NC}        - $s"
             done
             has_files=true
         fi
@@ -4297,10 +5009,10 @@ show_bootsplash_status() {
     # /sbin binaries
     local sbin_bins=$(find /sbin -name "xbs_*" -type f -executable 2>/dev/null)
     if [[ -n "$sbin_bins" ]]; then
-        echo -e "${NC}   Boot binaries (/sbin):"
+        echo -e "${NC}      Boot binaries (/sbin):"
         for b in $sbin_bins; do
             local bsize=$(du -h "$b" 2>/dev/null | cut -f1)
-            echo -e "${NC}     - $b ($bsize)"
+            echo -e "${NC}        - $b ($bsize)"
         done
         has_files=true
     fi
@@ -4308,34 +5020,34 @@ show_bootsplash_status() {
     # Shutdown binaries
     local shutdown_bins=$(find /lib/systemd/system-shutdown -name "xbs_*" -type f -executable 2>/dev/null)
     if [[ -n "$shutdown_bins" ]]; then
-        echo -e "${NC}   Shutdown binaries (/lib/systemd/system-shutdown):"
+        echo -e "${NC}      Shutdown binaries (/lib/systemd/system-shutdown):"
         for b in $shutdown_bins; do
             local bsize=$(du -h "$b" 2>/dev/null | cut -f1)
-            echo -e "${NC}     - $b ($bsize)"
+            echo -e "${NC}        - $b ($bsize)"
         done
         has_files=true
     fi
     
     # Systemd shutdown script
     if [[ -f /lib/systemd/system-shutdown/bootsplash.shutdown ]]; then
-        echo -e "${NC}   Systemd shutdown: /lib/systemd/system-shutdown/bootsplash.shutdown"
+        echo -e "${NC}      Systemd shutdown: /lib/systemd/system-shutdown/bootsplash.shutdown"
         has_files=true
     fi
     
     if [[ "$has_files" == "false" ]]; then
-        echo -e "${NC}   ${YELLOW}No xbsbootsplash files installed${NC}"
+        echo -e "${NC}       ${YELLOW}No xbootsplash files installed${NC}"
     fi
     
-    echo -e "${BLUE}════════════════════════════════════════════════════════════════${NC}"
+    echo -e "${BLUE}   ════════════════════════════════════════════════════════════════${NC}"
     echo ""
 }
 
 # Uninstall ALL detected splash systems
 uninstall_all_splash() {
     echo ""
-    echo -e "${RED}${BOLD}╔══════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${RED}${BOLD}║         UNINSTALL ALL SPLASH SYSTEMS                         ║${NC}"
-    echo -e "${RED}${BOLD}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo -e "       ${RED}╔════════════════════════════════════════════════╗${NC}"
+    echo -e "       ${RED}║${BOLD}         UNINSTALL ALL SPLASH SYSTEMS           ${NC}${RED}║${NC}"
+    echo -e "       ${RED}╚════════════════════════════════════════════════╝${NC}"
     
     # Show current status first
     show_bootsplash_status
@@ -4504,36 +5216,36 @@ uninstall_all_splash() {
 # Show main menu with optional DRM/fbdev toggle
 show_main_menu() {
     print_step "1" " Select action"
-    echo -e "    ╭────────────────────────────────────────────╮ "
-    echo -e "    │  ${CYAN}1)${NC} Build new splash                       │"
-    echo -e "    │  ${CYAN}2)${NC} Install existing xbs_* binary          │"
-    echo -e "    │  ${CYAN}3)${NC} Uninstall xbootsplash                  │"
-    echo -e "    │  ${CYAN}4)${NC} Splash current status                  │"
-    echo -e "    │  ${CYAN}5)${NC} Uninstall ALL splash systems           │"
+    echo -e "  ${YELLOW_GRAD4}╭─────────────────────────────────────────────────────────────────╮ "
+    echo -e "  ${YELLOW_GRAD4}│  ${CYAN}1)${NC} ${BOLD}Build${NC} new splash            ${CYAN}5)${NC} ${BOLD}Uninstall${NC} xbootsplash        ${YELLOW_GRAD4}│"
+    echo -e "  ${YELLOW_GRAD4}│  ${CYAN}2)${NC} ${BOLD}Install${NC} xbs binary/package  ${CYAN}6)${NC} ${BOLD}Uninstall ALL${NC} splash systems ${YELLOW_GRAD4}│"
+    echo -en "  ${YELLOW_GRAD4}│  ${CYAN}3)${NC} ${BOLD}Extract${NC} xbs binary/package  "
     if [[ $LIBDRM_AVAILABLE -eq 1 ]]; then
         if [[ $USE_DRM -eq 1 ]]; then
-            echo -e "    │  ${CYAN}T)${NC} Toggle mode (current: ${GREEN}DRM${NC})             │"
+           echo -e "${CYAN}T)${NC} ${BOLD}Toggle mode${NC} (current: ${GREEN}DRM${NC})   ${YELLOW_GRAD4}│"
         else
-            echo -e "    │  ${CYAN}T)${NC} Toggle mode (current: ${GREEN}fbdev${NC})           │"
+           echo -e "${CYAN}T)${NC} ${BOLD}Toggle mode${NC} (current: ${GREEN}fbdev${NC}) ${YELLOW_GRAD4}│"
         fi
     fi
-    echo -e "    │  ${CYAN}Q)${NC} Quit                                   │"
-    echo -e "    ╰────────────────────────────────────────────╯ "
-    echo -en "   ${YELLOW}  ➤ Select option [${CYAN}1${YELLOW}]: ${NC}"
-    read -r main_choice
+    echo -e "  ${YELLOW_GRAD4}│  ${CYAN}4)${NC} ${BOLD}Status${NC} splash               ${BOLD}${YELLOW_GRAD5}Q)${NC} ${BOLD}Quit${NC}                         ${YELLOW_GRAD4}│"
+    echo -e "  ${YELLOW_GRAD4}┕━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┙ "
+    echo -en " ${YELLOW}  ➤ Select option [${CYAN}1${YELLOW}]: ${NC}"
+     read -r main_choice
     
     case "$main_choice" in
         2)
             install_existing_binary
+            local _ret=$?
+            if [ $_ret -eq 0 ]; then
+                show_main_menu
+                return
+            fi
             exit 0
             ;;
         3)
-            if [[ $EUID -ne 0 ]]; then
-                print_info "This option requires root privileges"
-                exec sudo "$0" --uninstall-only
-            fi
-            do_uninstall
-            exit 0
+            extract_binary
+            show_main_menu
+            return
             ;;
         4)
             show_bootsplash_status
@@ -4541,12 +5253,48 @@ show_main_menu() {
             return
             ;;
         5)
+            echo ""
+            echo -e "${YELLOW}Uninstall xbootsplash:${NC}"
+            echo "  - Removes xbs_* binaries from /sbin and /lib/systemd/system-shutdown"
+            echo "  - Cleans up initramfs hooks and configuration"
+            echo "  - Restores previous initramfs backup if available"
+            echo ""
+            if ! ask_continue "Proceed with uninstall?"; then
+                show_main_menu
+                return
+            fi
+            if [[ $EUID -ne 0 ]]; then
+                print_info "This option requires root privileges"
+                exec sudo "$0" --uninstall-only
+            fi
+            do_uninstall
+            echo ""
+            echo -en "${YELLOW}Press Enter to return to main menu...${NC}"
+            read -r
+            show_main_menu
+            return
+            ;;
+        6)
+            echo ""
+            echo -e "${YELLOW}Uninstall ALL splash systems:${NC}"
+            echo "  - Removes xbootsplash AND Plymouth from system"
+            echo "  - Cleans up all initramfs splash configurations"
+            echo "  - Rebuilds initramfs after removal"
+            echo ""
+            if ! ask_continue "Proceed with full uninstall?"; then
+                show_main_menu
+                return
+            fi
             if [[ $EUID -ne 0 ]]; then
                 print_info "This option requires root privileges"
                 exec sudo "$0" --uninstall-all
             fi
             uninstall_all_splash
-            exit 0
+            echo ""
+            echo -en "${YELLOW}Press Enter to return to main menu...${NC}"
+            read -r
+            show_main_menu
+            return
             ;;
         [Tt])
             if [[ $LIBDRM_AVAILABLE -eq 1 ]]; then
@@ -4581,9 +5329,9 @@ show_main_menu() {
         # Get input if not already provided via argument or if previous attempt failed
         if [ -z "$FRAME_DIR" ] || [ ! -e "$FRAME_DIR" ]; then
             if [ $DISPLAY_MODE -eq 3 ] || [ $DISPLAY_MODE -eq 4 ]; then
-                echo -en "\n   ${YELLOW}➤ Enter the path to the static image (PNG/JPG) [or 'Q' to quit]: ${NC}"
+                echo -en "\n   ${YELLOW}➤ Enter the path to the static image (PNG/JPG) [or 'Q' to quit]: ${NC}\n     >${BOLD} "
             else
-                echo -en "\n   ${YELLOW}➤ Enter the directory containing frame images [or 'Q' to quit]: ${NC}"
+                 echo -en "\n   ${YELLOW}➤ Enter the directory containing frame images [or 'Q' to quit]: ${NC}\n     >${BOLD} "
             fi
             read -r FRAME_DIR
             [ -z "$FRAME_DIR" ] && continue
@@ -4624,7 +5372,7 @@ show_main_menu() {
             fi
             
             if analyze_frames "$FRAME_DIR"; then
-                if ask_continue "➤ Proceed with these frames ?"; then
+                if ask_continue "${YELLOW}  ➤ Proceed with these frames ?"; then
                     break
                 else
             print_info "                    .:::.           "
@@ -4688,7 +5436,7 @@ show_main_menu() {
                 fi
                 
                 if analyze_frames "$FRAME_DIR"; then
-                    if ask_continue "➤ Proceed with these frames ?"; then
+                    if ask_continue "${YELLOW}  ➤ Proceed with these frames ?"; then
                         break
                     else
             print_info "                   __MMM__         "
@@ -4733,15 +5481,15 @@ if [ -n "$INSTALL_EXISTING" ]; then
             ;;
         both)
             echo ""
-            echo -e "${CYAN}═══════════════════════════════════════${NC}"
-            echo -e "${CYAN}   Part 1/2: Boot Splash Installation   ${NC}"
-            echo -e "${CYAN}═══════════════════════════════════════${NC}"
+            echo -e "${CYAN}═════════════════════════════════════════${NC}"
+            echo -e "${CYAN}   Part 1/2: ${BOLD}Boot Splash Installation   ${NC}"
+            echo -e "${CYAN}═════════════════════════════════════════${NC}"
             check_plymouth
             install_standard
             echo ""
-            echo -e "${CYAN}═══════════════════════════════════════${NC}"
-            echo -e "${CYAN}   Part 2/2: Shutdown Splash Installation${NC}"
-            echo -e "${CYAN}═══════════════════════════════════════${NC}"
+            echo -e "${CYAN}═══════════════════════════════════════════${NC}"
+            echo -e "${CYAN}   Part 2/2: ${BOLD}Shutdown Splash Installation${NC}"
+            echo -e "${CYAN}═══════════════════════════════════════════${NC}"
             install_shutdown
             ;;
         boot|standard|"")

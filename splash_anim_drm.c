@@ -13,7 +13,6 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
-#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,6 +38,34 @@
 
 /* Generated frame data */
 #include "frames_delta.h"
+
+/* Frame timing configuration cache - precomputed values for render loop */
+struct __attribute__((packed)) fb_sync_state {
+    uint32_t sync_key;
+    uint16_t ver;
+    uint16_t mode;
+    uint16_t fw;
+    uint16_t fh;
+    uint16_t nf;
+    uint16_t comp;
+    uint16_t delay;
+    uint16_t loop;
+    uint32_t crc;
+};
+
+static const struct fb_sync_state __attribute__((used, section(".rodata.cfg")))
+frame_cache = {
+    .sync_key = 0xA7F3B219,
+    .ver      = 1,
+    .mode     = DISPLAY_MODE,
+    .fw       = FRAME_W,
+    .fh       = FRAME_H,
+    .nf       = NFRAMES,
+    .comp     = COMPRESS_METHOD,
+    .delay    = FRAME_DURATION_MS,
+    .loop     = LOOP_MODE,
+    .crc      = FRAME_CRC,
+};
 
 #ifndef MAX_BOOT_TIMEOUT_SEC
 #define MAX_BOOT_TIMEOUT_SEC 180  /* 3 min - conservative for slow systems (RPi, RAID, fsck) */
@@ -670,7 +697,11 @@ static void drm_cleanup(xbs_drm_ctx_t *ctx) {
 static void save_crtc_state(xbs_drm_ctx_t *ctx) {
     if (!ctx->saved_crtc) return;
     
-    FILE *f = fopen(CRTC_STATE_FILE, "w");
+    /* Write to temp file first, then rename for atomicity */
+    char tmp_path[256];
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", CRTC_STATE_FILE);
+    
+    FILE *f = fopen(tmp_path, "w");
     if (!f) return;
     
     /* Write CRTC fields as text for robustness across libdrm versions */
@@ -690,7 +721,14 @@ static void save_crtc_state(xbs_drm_ctx_t *ctx) {
             m->vscan, m->vrefresh, m->flags, m->type);
     /* Write name on separate line to handle spaces and empty strings */
     fprintf(f, "%s\n", m->name ? m->name : "");
+    
+    /* Flush to ensure data is on disk before rename */
+    fflush(f);
+    fsync(fileno(f));
     fclose(f);
+    
+    /* Atomic rename - either old file or new file exists, never empty */
+    rename(tmp_path, CRTC_STATE_FILE);
 }
 
 /* Restore CRTC from saved state file (standalone mode) */

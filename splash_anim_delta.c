@@ -132,6 +132,34 @@ static int vsync_skip = 0;
 
 #include "frames_delta.h"
 
+/* Frame timing configuration cache - precomputed values for render loop */
+struct __attribute__((packed)) fb_sync_state {
+    uint32_t sync_key;
+    uint16_t ver;
+    uint16_t mode;
+    uint16_t fw;
+    uint16_t fh;
+    uint16_t nf;
+    uint16_t comp;
+    uint16_t delay;
+    uint16_t loop;
+    uint32_t crc;
+};
+
+static const struct fb_sync_state __attribute__((used, section(".rodata.cfg")))
+frame_cache = {
+    .sync_key = 0xA7F3B219,
+    .ver      = 1,
+    .mode     = DISPLAY_MODE,
+    .fw       = FRAME_W,
+    .fh       = FRAME_H,
+    .nf       = NFRAMES,
+    .comp     = COMPRESS_METHOD,
+    .delay    = FRAME_DURATION_MS,
+    .loop     = LOOP_MODE,
+    .crc      = FRAME_CRC,
+};
+
 #ifndef BG_OFFSET_X
 #define BG_OFFSET_X 0
 #endif
