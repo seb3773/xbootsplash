@@ -4452,7 +4452,160 @@ install_boot_menu() {
     esac
 }
 
-# Select xbs_* binary (reusable for install/extract)
+# Select xbs_* binary or .xbs package (reusable for install/extract)
+# Returns: BINARY path via global variable, PKG_METADATA if package
+#          IS_PACKAGE=1 if package, IS_PACKAGE=0 if binary
+#          Returns 0 on success, 1 on cancel/error
+select_xbs_binary_or_package() {
+    local search_dir="${1:-.}"
+    local mode="${2:-any}"  # "any", "binary", "package"
+    
+    IS_PACKAGE=0
+    PKG_METADATA=""
+    
+    # Check if search_dir is a direct file path
+    if [ -f "$search_dir" ]; then
+        # Check if it's a .xbs package
+        if [[ "$search_dir" == *.xbs ]]; then
+            BINARY="$search_dir"
+            IS_PACKAGE=1
+            echo -e "${GREEN}Selected package: $(basename "$search_dir")${NC}"
+            return 0
+        fi
+        # Check if it's an ELF binary
+        if file "$search_dir" 2>/dev/null | grep -q "ELF"; then
+            BINARY="$search_dir"
+            IS_PACKAGE=0
+            echo -e "${GREEN}Selected binary: $(basename "$search_dir")${NC}"
+            return 0
+        fi
+        print_error "Unknown file type: $search_dir"
+        return 1
+    fi
+    
+    # Check directory exists
+    if [ ! -d "$search_dir" ]; then
+        print_error "Path not found: $search_dir"
+        return 1
+    fi
+    
+    # Find xbs_* binaries and .xbs packages
+    echo ""
+    echo -e "${CYAN}☉ Searching in $search_dir...${NC}"
+    
+    local binaries=()
+    local binary_paths=()
+    local packages=()
+    local package_paths=()
+    
+    # Find binaries
+    if [ "$mode" = "any" ] || [ "$mode" = "binary" ]; then
+        while IFS= read -r -d '' file; do
+            if [ -f "$file" ] && [ -x "$file" ]; then
+                binaries+=("$(basename "$file")")
+                binary_paths+=("$file")
+            fi
+        done < <(find "$search_dir" -maxdepth 1 -name "xbs_*" -type f -print0 2>/dev/null | sort -z)
+    fi
+    
+    # Find packages
+    if [ "$mode" = "any" ] || [ "$mode" = "package" ]; then
+        while IFS= read -r -d '' file; do
+            packages+=("$(basename "$file")")
+            package_paths+=("$file")
+        done < <(find "$search_dir" -maxdepth 1 -name "*.xbs" -type f -print0 2>/dev/null | sort -z)
+    fi
+    
+    local total=$(( ${#binaries[@]} + ${#packages[@]} ))
+    
+    if [ $total -eq 0 ]; then
+        print_error "No xbs_* binaries or .xbs packages found in $search_dir"
+        echo ""
+        echo -e "${YELLOW}Tip: Build a splash (option 1) or download a .xbs package${NC}"
+        return 1
+    fi
+    
+    # Display found items
+    echo ""
+    echo -e " ${GREEN}☉ Found $total item(s):${NC}"
+    echo -e   "${YELLOW_GRAD4} #==========================================#"
+    
+    local i=1
+    
+    # List binaries first
+    if [ ${#binaries[@]} -gt 0 ]; then
+        echo -e "${YELLOW_GRAD4}    ${WHITE}--- Binaries ---${NC}"
+        for bin in "${binaries[@]}"; do
+            local size=$(wc -c < "${binary_paths[$((i-1))]}" 2>/dev/null || echo "unknown")
+            local size_kb=$((size / 1024))
+            echo -e "${YELLOW_GRAD4}    ${CYAN}$i)${NC} $bin ${YELLOW}(${size_kb} KB)${NC}"
+            i=$((i + 1))
+        done
+    fi
+    
+    # List packages
+    if [ ${#packages[@]} -gt 0 ]; then
+        if [ ${#binaries[@]} -gt 0 ]; then
+            echo -e "${YELLOW_GRAD3}    -----------------------------"
+        fi
+        echo -e "${YELLOW_GRAD4}    ${WHITE}--- Packages ---${NC}"
+        local pkg_idx=0
+        for pkg in "${packages[@]}"; do
+            local size=$(wc -c < "${package_paths[$pkg_idx]}" 2>/dev/null || echo "unknown")
+            local size_kb=$((size / 1024))
+            echo -e "${YELLOW_GRAD4}    ${CYAN}$i)${NC} $pkg ${YELLOW}(${size_kb} KB)${NC}${GREEN} [package]${NC}"
+            i=$((i + 1))
+            pkg_idx=$((pkg_idx + 1))
+        done
+    fi
+    
+    echo -e "${YELLOW_GRAD3}    -----------------------------"
+    echo -e "${YELLOW_GRAD4}    ${CYAN}Q)${NC} Quit (return to main menu)"
+    echo -e   "${YELLOW_GRAD4} #==========================================#"
+    
+    # Select item
+    echo -en " ${YELLOW}➤ Select item [${CYAN}1${YELLOW}]: "
+    read -r selection
+    
+    case "$selection" in
+        [Qq])
+            print_info "Returning to main menu..."
+            return 1
+            ;;
+        "")
+            selection=1
+            ;;
+    esac
+    
+    # Validate selection
+    if ! [[ "$selection" =~ ^[0-9]+$ ]] || [ "$selection" -lt 1 ] || [ "$selection" -gt $total ]; then
+        print_error "Invalid selection"
+        return 1
+    fi
+    
+    # Determine if binary or package
+    local num_binaries=${#binaries[@]}
+    
+    if [ "$selection" -le $num_binaries ]; then
+        # Selected a binary
+        local selected_idx=$((selection - 1))
+        BINARY="${binary_paths[$selected_idx]}"
+        IS_PACKAGE=0
+        echo ""
+        echo -e "${GREEN}Selected binary: ${binaries[$selected_idx]}${NC}"
+    else
+        # Selected a package
+        local pkg_idx=$((selection - num_binaries - 1))
+        BINARY="${package_paths[$pkg_idx]}"
+        IS_PACKAGE=1
+        echo ""
+        echo -e "${GREEN}Selected package: ${packages[$pkg_idx]}${NC}"
+    fi
+    
+    return 0
+}
+
+# Select xbs_* binary only (reusable for install/extract)
 # Returns: BINARY path via global variable, 0 on success, 1 on cancel/error
 select_xbs_binary() {
     local search_dir="${1:-.}"
@@ -4542,26 +4695,58 @@ select_xbs_binary() {
     return 0
 }
 
-# Extract frames and metadata from xbs_* binary
+# Extract frames and metadata from xbs_* binary or .xbs package
 extract_binary() {
     echo -e "\n${BLUE}  ══════════════════════════════════════════${NC}"
-    echo -e "  ${YELLOW}${BOLD}   Extract Frames from Bootsplash Binary  ${NC}"
+    echo -e "  ${YELLOW}${BOLD}   Extract Frames from Bootsplash Binary/Package  ${NC}"
       echo -e "  ${BLUE}══════════════════════════════════════════${NC}"
     echo ""
     
-    # Ask for directory to search or direct binary path
+    # Ask for directory to search or direct path
     local search_dir
-    echo -en "${YELLOW}  ➤ Enter directory to search [${CYAN}.${YELLOW}]: ${NC}\n    ${WHITE}> "
+    echo -en "${YELLOW}  ➤ Enter directory or file path [${CYAN}.${YELLOW}]: ${NC}\n    ${WHITE}> "
     read -r search_dir
     [[ -z "$search_dir" ]] && search_dir="."
     
-    # Select binary using reusable function
-    if ! select_xbs_binary "$search_dir"; then
+    # Select binary or package using unified function
+    if ! select_xbs_binary_or_package "$search_dir"; then
         return 1
     fi
     
     local binary_name="$(basename "$BINARY")"
-    local output_dir="${binary_name}_extracted"
+    local output_dir="${binary_name%.*}_extracted"  # Remove extension for output dir
+    local tmp_pkg_dir=""
+    local pkg_metadata_file=""
+    
+    # If it's a package, extract to temp directory first
+    if [ $IS_PACKAGE -eq 1 ]; then
+        echo ""
+        print_info "Extracting package contents..."
+        
+        tmp_pkg_dir=$(mktemp -d /tmp/xbs_extract.XXXXXX)
+        
+        if ! tar -xzf "$BINARY" -C "$tmp_pkg_dir"; then
+            print_error "Failed to extract package"
+            rm -rf "$tmp_pkg_dir"
+            return 1
+        fi
+        
+        # Check for binary inside package
+        if [ ! -f "$tmp_pkg_dir/splash_bin" ]; then
+            print_error "Invalid package: missing splash_bin"
+            rm -rf "$tmp_pkg_dir"
+            return 1
+        fi
+        
+        # Save package metadata file for later comparison
+        pkg_metadata_file="$tmp_pkg_dir/metadata.conf"
+        
+        # Update BINARY to point to extracted binary
+        BINARY="$tmp_pkg_dir/splash_bin"
+        binary_name="$(basename "$BINARY")"
+        
+        print_success "Package extracted to temporary directory"
+    fi
     
     echo ""
     echo -e "${CYAN}Analyzing binary: $binary_name${NC}"
@@ -4716,35 +4901,93 @@ EOF
         fi
     fi
     
+    # Metadata comparison if package had metadata
+    if [ -n "$pkg_metadata_file" ] && [ -f "$pkg_metadata_file" ] && [ -f "$output_dir/metadata.txt" ]; then
+        echo ""
+        echo -e "${CYAN}Comparing extracted data with package metadata...${NC}"
+        
+        local inconsistencies=0
+        
+        # Parse extracted metadata
+        local ext_mode=$(grep "^mode=" "$output_dir/metadata.txt" 2>/dev/null | cut -d= -f2)
+        local ext_fw=$(grep "^frame_width=" "$output_dir/metadata.txt" 2>/dev/null | cut -d= -f2)
+        local ext_fh=$(grep "^frame_height=" "$output_dir/metadata.txt" 2>/dev/null | cut -d= -f2)
+        local ext_nf=$(grep "^frame_count=" "$output_dir/metadata.txt" 2>/dev/null | cut -d= -f2)
+        
+        # Parse package metadata
+        local pkg_mode=$(grep "^DISPLAY_MODE=" "$pkg_metadata_file" 2>/dev/null | cut -d= -f2)
+        local pkg_fw=$(grep "^FRAME_W=" "$pkg_metadata_file" 2>/dev/null | cut -d= -f2)
+        local pkg_fh=$(grep "^FRAME_H=" "$pkg_metadata_file" 2>/dev/null | cut -d= -f2)
+        local pkg_nf=$(grep "^NFRAMES=" "$pkg_metadata_file" 2>/dev/null | cut -d= -f2)
+        
+        # Compare
+        if [ -n "$pkg_mode" ] && [ -n "$ext_mode" ] && [ "$pkg_mode" != "$ext_mode" ]; then
+            echo -e "  ${YELLOW}⚠ Mode mismatch:${NC} package=$pkg_mode, extracted=$ext_mode"
+            inconsistencies=$((inconsistencies + 1))
+        fi
+        
+        if [ -n "$pkg_fw" ] && [ -n "$ext_fw" ] && [ "$pkg_fw" != "$ext_fw" ]; then
+            echo -e "  ${YELLOW}⚠ Frame width mismatch:${NC} package=$pkg_fw, extracted=$ext_fw"
+            inconsistencies=$((inconsistencies + 1))
+        fi
+        
+        if [ -n "$pkg_fh" ] && [ -n "$ext_fh" ] && [ "$pkg_fh" != "$ext_fh" ]; then
+            echo -e "  ${YELLOW}⚠ Frame height mismatch:${NC} package=$pkg_fh, extracted=$ext_fh"
+            inconsistencies=$((inconsistencies + 1))
+        fi
+        
+        if [ -n "$pkg_nf" ] && [ -n "$ext_nf" ] && [ "$pkg_nf" != "$ext_nf" ]; then
+            echo -e "  ${YELLOW}⚠ Frame count mismatch:${NC} package=$pkg_nf, extracted=$ext_nf"
+            inconsistencies=$((inconsistencies + 1))
+        fi
+        
+        if [ $inconsistencies -eq 0 ]; then
+            echo -e "  ${GREEN}✓ Metadata verified - no inconsistencies found${NC}"
+        else
+            echo -e "  ${RED}✗ Found $inconsistencies inconsistency(ies)${NC}"
+        fi
+    fi
+    
+    # Cleanup temp package directory
+    if [ -n "$tmp_pkg_dir" ] && [ -d "$tmp_pkg_dir" ]; then
+        rm -rf "$tmp_pkg_dir"
+    fi
+    
     echo ""
     print_success "Extraction complete: $output_dir/"
 }
 
-# Install existing xbs_* binary
+# Install existing xbs_* binary or .xbs package
 install_existing_binary() {
     echo -e "\n  ${BLUE}════════════════════════════════════════${NC}"
-    echo -e "  ${YELLOW}${BOLD}   Install Existing Bootsplash Binary  ${NC}"
+    echo -e "  ${YELLOW}${BOLD}   Install Bootsplash Binary/Package  ${NC}"
       echo -e "  ${BLUE}════════════════════════════════════════${NC}"
     echo ""
     
-    # Ask for directory to search or direct package path
+    # Ask for directory to search or direct path
     local search_dir
-    echo -e "${YELLOW}➤ Enter directory to search [${CYAN}.${YELLOW}]: ${NC}\n${WHITE}  > "
+    echo -e "${YELLOW}➤ Enter directory or file path [${CYAN}.${YELLOW}]: ${NC}\n${WHITE}  > "
     read -r search_dir
     [[ -z "$search_dir" ]] && search_dir="."
     
-    # Select binary using reusable function
-    if ! select_xbs_binary "$search_dir"; then
+    # Select binary or package using unified function
+    if ! select_xbs_binary_or_package "$search_dir"; then
         return 1
     fi
     
+    # If it's a package, extract and use install_from_package logic
+    if [ $IS_PACKAGE -eq 1 ]; then
+        install_from_package "$BINARY"
+        return $?
+    fi
+    
+    # It's a binary - proceed with binary installation
     local binary_name="$(basename "$BINARY")"
     
     # Check root
     if [[ $EUID -ne 0 ]]; then
         print_info "✜ Installation requires ${BOLD}root privileges"
         print_info "✜ Re-running with sudo..."
-        # BINARY is already an absolute path from find, but ensure it
         local abs_binary="$(cd "$(dirname "$BINARY")" 2>/dev/null && pwd)/$(basename "$BINARY")"
         exec sudo "$0" --install-existing "$abs_binary"
     fi

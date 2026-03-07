@@ -534,8 +534,8 @@ int main(int argc, char *argv[]) {
             }
             
             int pixels = wm.fw * wm.fh;
-            uint16_t *frame = malloc(pixels * sizeof(uint16_t));
-            uint16_t *prev_frame = malloc(pixels * sizeof(uint16_t));
+            uint16_t *frame = malloc((size_t)pixels * sizeof(uint16_t));
+            uint16_t *prev_frame = malloc((size_t)pixels * sizeof(uint16_t));
             
             /* Static modes (3,4): single palette+LZSS image */
             if (wm.mode == 3 || wm.mode == 4) {
@@ -561,17 +561,17 @@ int main(int argc, char *argv[]) {
                 int extracted = 0;
                 
                 for (int i = 0; i < wm.nf && pos < rodata_size; i++) {
-                    memset(frame, 0, pixels * sizeof(uint16_t));
+                    memset(frame, 0, (size_t)pixels * sizeof(uint16_t));
                     
                     if (i == 0) {
                         /* First frame */
                         if (wm.comp == 0) {
                             /* Raw RGB565 */
-                            if (pos + pixels * 2 <= rodata_size) {
+                            if (pos + (size_t)pixels * 2 <= rodata_size) {
                                 for (int p = 0; p < pixels; p++) {
-                                    frame[p] = rodata[pos + p*2] | (rodata[pos + p*2 + 1] << 8);
+                                    frame[p] = rodata[pos + (size_t)p * 2] | (rodata[pos + (size_t)p * 2 + 1] << 8);
                                 }
-                                pos += pixels * 2;
+                                pos += (size_t)pixels * 2;
                                 extracted++;
                             }
                         } else if (wm.comp == 2) {
@@ -583,17 +583,17 @@ int main(int argc, char *argv[]) {
                             }
                         } else {
                             /* Try raw as fallback */
-                            if (pos + pixels * 2 <= rodata_size) {
+                            if (pos + (size_t)pixels * 2 <= rodata_size) {
                                 for (int p = 0; p < pixels; p++) {
-                                    frame[p] = rodata[pos + p*2] | (rodata[pos + p*2 + 1] << 8);
+                                    frame[p] = rodata[pos + (size_t)p * 2] | (rodata[pos + (size_t)p * 2 + 1] << 8);
                                 }
-                                pos += pixels * 2;
+                                pos += (size_t)pixels * 2;
                                 extracted++;
                             }
                         }
                     } else {
                         /* Delta frames */
-                        memcpy(frame, prev_frame, pixels * sizeof(uint16_t));
+                        memcpy(frame, prev_frame, (size_t)pixels * sizeof(uint16_t));
                         
                         if (wm.comp == 1 || wm.comp == 4) {
                             /* RLE XOR */
@@ -617,7 +617,7 @@ int main(int argc, char *argv[]) {
                         }
                     }
                     
-                    memcpy(prev_frame, frame, pixels * sizeof(uint16_t));
+                    memcpy(prev_frame, frame, (size_t)pixels * sizeof(uint16_t));
                 }
                 
                 printf("\nExtracted %d frames\n", extracted);

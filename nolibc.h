@@ -274,69 +274,6 @@ static inline void *memcpy(void *dest, const void *src, size_t n) {
     return ret;
 }
 
-/* Simple arena allocator - no free, just bump pointer */
-/* Only include if needed - set NOLIBC_NO_ARENA to disable for runtime binary */
-#ifndef NOLIBC_NO_ARENA
-#define ARENA_SIZE (2 * 1024 * 1024)
-
-/* Header for each allocation: stores size for realloc */
-typedef struct {
-    size_t size;  /* Original requested size (not aligned) */
-} alloc_header_t;
-
-static char arena[ARENA_SIZE] __attribute__((aligned(16)));
-static size_t arena_offset = 0;
-
-static inline void *malloc(size_t size) {
-    /* Reserve space for header + aligned payload */
-    size_t aligned_size = (size + 15) & ~15;
-    size_t total_size = sizeof(alloc_header_t) + aligned_size;
-    
-    if (arena_offset + total_size > ARENA_SIZE) {
-        return NULL;
-    }
-    
-    /* Store header with original size */
-    alloc_header_t *header = (alloc_header_t *)(arena + arena_offset);
-    header->size = size;
-    
-    void *ptr = arena + arena_offset + sizeof(alloc_header_t);
-    arena_offset += total_size;
-    return ptr;
-}
-
-static inline void free(void *ptr) {
-    /* No-op for arena allocator */
-    (void)ptr;
-}
-
-static inline void *realloc(void *ptr, size_t size) {
-    /* If ptr is NULL, just malloc */
-    if (!ptr) return malloc(size);
-    
-    /* If size is 0, free (no-op) and return NULL */
-    if (size == 0) return NULL;
-    
-    /* Get old size from header */
-    alloc_header_t *header = (alloc_header_t *)((char *)ptr - sizeof(alloc_header_t));
-    size_t old_size = header->size;
-    
-    /* Allocate new block */
-    void *new_ptr = malloc(size);
-    if (!new_ptr) return NULL;
-    
-    /* Copy old content up to min(old_size, new_size) */
-    size_t copy_size = old_size < size ? old_size : size;
-    char *src = (char *)ptr;
-    char *dst = (char *)new_ptr;
-    for (size_t i = 0; i < copy_size; i++) {
-        dst[i] = src[i];
-    }
-    
-    return new_ptr;
-}
-#endif /* NOLIBC_NO_ARENA */
-
 /* Nanosleep */
 #ifndef _STRUCT_TIMESPEC
 #define _STRUCT_TIMESPEC

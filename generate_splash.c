@@ -1294,6 +1294,17 @@ int main(int argc, char *argv[]) {
             int method_ids[] = {COMPRESS_RLE_XOR, COMPRESS_SPARSE, COMPRESS_RLE_DIRECT};
 
             uint8_t *frame0_buf = malloc((size_t)pixels * 2);
+            if (!frame0_buf) {
+                fprintf(stderr, "Error: Out of memory for frame0 buffer\n");
+                for (int i = 0; i < nframes; i++) {
+                    free(frame_imgs[i].pixels);
+                    free(frames[i].path);
+                    free(frames[i].tmp_path);
+                }
+                free(frame_imgs);
+                free(frames);
+                return 1;
+            }
             size_t frame0_size = compress_raw_direct(frame_imgs[0].pixels, pixels, frame0_buf);
 
             uint8_t **best_comp = NULL;
@@ -1305,6 +1316,13 @@ int main(int argc, char *argv[]) {
 
                 uint8_t **method_comp = calloc((size_t)nframes, sizeof(uint8_t *));
                 size_t *method_sizes = calloc((size_t)nframes, sizeof(size_t));
+                if (!method_comp || !method_sizes) {
+                    fprintf(stderr, "  %d/3: method %-12s ...... SKIPPED (out of memory)\n",
+                            m + 1, method_names[m]);
+                    free(method_comp);
+                    free(method_sizes);
+                    continue;
+                }
 
                 for (int f = 1; f < nframes; f++) {
                     size_t out_cap = 0;
@@ -1382,6 +1400,20 @@ int main(int argc, char *argv[]) {
                 free(method_sizes);
             }
             
+            /* Verify at least one method succeeded */
+            if (best_size == SIZE_MAX || !best_comp) {
+                fprintf(stderr, "Error: All compression methods failed\n");
+                free(frame0_buf);
+                for (int i = 0; i < nframes; i++) {
+                    free(frame_imgs[i].pixels);
+                    free(frames[i].path);
+                    free(frames[i].tmp_path);
+                }
+                free(frame_imgs);
+                free(frames);
+                return 1;
+            }
+            
             fprintf(stderr, "\n  ---> Best method: %s (%zu bytes)\n\n", 
                     method_names[best_method == COMPRESS_RLE_XOR ? 0 : 
                                  best_method == COMPRESS_SPARSE ? 1 : 2], best_size);
@@ -1395,6 +1427,23 @@ int main(int argc, char *argv[]) {
             /* Compress frames with selected method (reuse best buffers from auto-test) */
             uint8_t **compressed = malloc(sizeof(uint8_t*) * nframes);
             size_t *comp_sizes = malloc(sizeof(size_t) * nframes);
+            if (!compressed || !comp_sizes) {
+                fprintf(stderr, "Error: Out of memory for compressed arrays\n");
+                free(frame0_buf);
+                for (int f = 1; f < nframes; f++) free(best_comp[f]);
+                free(best_comp);
+                free(best_sizes);
+                for (int i = 0; i < nframes; i++) {
+                    free(frame_imgs[i].pixels);
+                    free(frames[i].path);
+                    free(frames[i].tmp_path);
+                }
+                free(frame_imgs);
+                free(frames);
+                free(compressed);
+                free(comp_sizes);
+                return 1;
+            }
             size_t total_size = 0;
 
             compressed[0] = frame0_buf;
@@ -1801,6 +1850,17 @@ int main(int argc, char *argv[]) {
             int method_ids[] = {COMPRESS_RLE_XOR, COMPRESS_SPARSE, COMPRESS_RLE_DIRECT};
 
             uint8_t *frame0_buf = malloc((size_t)pixels * 2);
+            if (!frame0_buf) {
+                fprintf(stderr, "Error: Out of memory for frame0 buffer\n");
+                for (int i = 0; i < nframes; i++) {
+                    free(frame_imgs[i].pixels);
+                    free(frames[i].path);
+                    free(frames[i].tmp_path);
+                }
+                free(frame_imgs);
+                free(frames);
+                return 1;
+            }
             size_t frame0_size = compress_raw_direct(frame_imgs[0].pixels, pixels, frame0_buf);
 
             uint8_t **best_comp = NULL;
@@ -1812,6 +1872,13 @@ int main(int argc, char *argv[]) {
 
                 uint8_t **method_comp = calloc((size_t)nframes, sizeof(uint8_t *));
                 size_t *method_sizes = calloc((size_t)nframes, sizeof(size_t));
+                if (!method_comp || !method_sizes) {
+                    fprintf(stderr, "  %d/3: method %-12s ...... SKIPPED (out of memory)\n",
+                            m + 1, method_names[m]);
+                    free(method_comp);
+                    free(method_sizes);
+                    continue;
+                }
 
                 for (int f = 1; f < nframes; f++) {
                     size_t out_cap = 0;
@@ -1889,6 +1956,20 @@ int main(int argc, char *argv[]) {
                 free(method_sizes);
             }
             
+            /* Verify at least one method succeeded */
+            if (best_size == SIZE_MAX || !best_comp) {
+                fprintf(stderr, "Error: All compression methods failed\n");
+                free(frame0_buf);
+                for (int i = 0; i < nframes; i++) {
+                    free(frame_imgs[i].pixels);
+                    free(frames[i].path);
+                    free(frames[i].tmp_path);
+                }
+                free(frame_imgs);
+                free(frames);
+                return 1;
+            }
+            
             fprintf(stderr, "\n  ---> Best method: %s (%zu bytes)\n\n", 
                     method_names[best_method == COMPRESS_RLE_XOR ? 0 : 
                                  best_method == COMPRESS_SPARSE ? 1 : 2], best_size);
@@ -1901,6 +1982,23 @@ int main(int argc, char *argv[]) {
 
             uint8_t **compressed = malloc(sizeof(uint8_t*) * nframes);
             size_t *comp_sizes = malloc(sizeof(size_t) * nframes);
+            if (!compressed || !comp_sizes) {
+                fprintf(stderr, "Error: Out of memory for compressed arrays\n");
+                free(frame0_buf);
+                for (int f = 1; f < nframes; f++) free(best_comp[f]);
+                free(best_comp);
+                free(best_sizes);
+                for (int i = 0; i < nframes; i++) {
+                    free(frame_imgs[i].pixels);
+                    free(frames[i].path);
+                    free(frames[i].tmp_path);
+                }
+                free(frame_imgs);
+                free(frames);
+                free(compressed);
+                free(comp_sizes);
+                return 1;
+            }
             size_t total_size = 0;
 
             compressed[0] = frame0_buf;

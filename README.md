@@ -74,6 +74,8 @@ Tested/compatible with:
 - **Graceful Shutdown**: SIGTERM/SIGINT handler for clean exit
 - **Custom Binary Names**: Install multiple splash screens with unique names (xbs_*)
 - **Package System**: Export and install distributable .xbs theme packages
+- **Binary Extraction**: Extract frames and images from compiled xbs_* binaries
+- **Dual Coordinate Systems**: Position elements by offsets from center or absolute coordinates
 
 ## Package System (.xbs)
 
@@ -157,6 +159,12 @@ Examples:
 | **4** | Static image full screen | Wallpaper/splash art | 1-4 MB |
 
 ### Mode Details
+
+**Coordinate Systems:** During configuration (STEP 4), you can choose between:
+- **Offsets mode** (default): Each element is automatically centered, and you specify offsets from the centered position
+- **Coordinates mode**: You specify absolute X,Y coordinates for each element (top-left corner)
+
+Offsets are recommended for most use cases as they automatically adapt to resolution changes.
 
 ```
 Mode 0: Animation on solid background
@@ -306,6 +314,7 @@ xbootsplash/
 ├── splash_anim_delta.c     # fbdev program (multi-mode animation)
 ├── splash_anim_drm.c       # DRM/KMS program (dumb buffer rendering)
 ├── generate_splash.c       # Generator tool (PNG → compressed C header)
+├── extract_frames.c         # Extraction tool (binary → PNG frames)
 └── build_anim.sh           # Interactive builder + installer script
 ```
 
@@ -389,9 +398,10 @@ Only the code needed for the selected mode is compiled into the binary:
 | Mode | Code Included |
 |------|---------------|
 | 0 | Animation loop + solid background fill |
-| 1 | Animation loop + background image blit |
-| 2 | Static display + solid background fill |
-| 3 | Static display only |
+| 1 | Animation loop + background image blit (centered) |
+| 2 | Animation loop + background image blit (fullscreen) |
+| 3 | Static display + solid background fill |
+| 4 | Static display + fullscreen image |
 
 ### 4. Single Frame Buffer
 
@@ -461,8 +471,9 @@ The benchmark tool automatically recommends the best method for your frames.
 |------|------------|------|
 | 0 | Code + frame data + buffer | ~90 KB |
 | 1 | Code + frame data + bg + 2 buffers | 500 KB - 2 MB |
-| 2 | Code + image + buffer | ~20 KB |
-| 3 | Code + image | 1-4 MB |
+| 2 | Code + frame data + bg (fullscreen) + buffer | 2-4 MB |
+| 3 | Code + image + buffer | ~20 KB |
+| 4 | Code + image (fullscreen) | 1-4 MB |
 
 ## Framebuffer Support
 
@@ -515,20 +526,22 @@ The generator automatically:
 ### Static Image
 
 ```bash
-# Single logo on colored background
-./build_anim.sh -m 2 -c 1a1a2e logo.png
+# Mode 3: Static logo on colored background
+./build_anim.sh -m 3 -c 0d1117 logo.png
 
-# Full screen wallpaper (auto-resize to 1920x1080)
-./build_anim.sh -m 3 -r 1920x1080 wallpaper.png
+# Mode 4: Full screen wallpaper (auto-resize to 1920x1080)
+./build_anim.sh -m 4 -r 1920x1080 wallpaper.png
 ```
 
 ### Parameters
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `-m, --mode` | Display mode (0-3) | 0 |
+| `-m, --mode` | Display mode (0-4) | 0 |
 | `-x, --offset-x` | Horizontal offset from center | 0 |
 | `-y, --offset-y` | Vertical offset from center | 80 |
+| `-X, --bg-offset-x` | Background image X offset (mode 1) | 0 |
+| `-Y, --bg-offset-y` | Background image Y offset (mode 1) | 0 |
 | `-c, --bg-color` | Background color (RRGGBB hex) | 000000 |
 | `-b, --bg-image` | Background image (mode 1) | - |
 | `-r, --resolution` | Target resolution WxH | auto |
@@ -561,6 +574,66 @@ Example with 115 frames (Windows 10 spinner, 64x64):
 | Raw RGB565 | 920 KB |
 | **Delta RLE** | **74 KB** |
 | **Compression** | **12.44x** |
+
+## Binary Extraction
+
+xbootsplash includes a tool to extract frames and images from compiled `xbs_*` binaries. This is useful for:
+- Recovering frames from a compiled splash
+- Analyzing existing splash binaries
+- Converting between splash configurations
+
+### Using the Extraction Tool
+
+```bash
+# Extract from a binary
+./extract_frames xbs_mytheme mytheme_extracted/
+
+# Output structure:
+mytheme_extracted/
+├── metadata.txt           # Binary metadata (mode, resolution, etc.)
+├── frame_0.png            # Animation frames (modes 0, 1, 2)
+├── frame_1.png
+├── ...
+├── static/                # For hybrid modes (1, 2)
+│   └── background.png     # Background image
+└── static.png             # For static modes (3, 4)
+```
+
+### Extraction from build_anim.sh
+
+Use option 3 in the main menu:
+
+```bash
+./build_anim.sh
+# Select: 3) Extract xbs_* binary
+```
+
+The script will:
+1. Search for `xbs_*` binaries in the specified directory
+2. Display metadata (mode, resolution, frame count, compression)
+3. Extract frames as PNG images
+
+### Supported Compression Methods
+
+The extraction tool decompresses all compression methods:
+
+| Method | Description |
+|--------|-------------|
+| Raw RGB565 | Uncompressed frames |
+| RLE XOR | RLE-encoded XOR deltas |
+| RLE Direct | RLE-encoded direct pixels |
+| Sparse XOR | Position + value for changed pixels |
+| Palette + LZSS | Palette-indexed LZSS compressed (static images, backgrounds) |
+
+### Extraction Output by Mode
+
+| Mode | Output Structure |
+|------|-----------------|
+| 0 (anim solid) | `frame_N.png` files |
+| 1 (anim + bg) | `static/background.png` + `frame_N.png` |
+| 2 (anim fullscreen bg) | `static/background.png` + `frame_N.png` |
+| 3 (static centered) | `static.png` |
+| 4 (static fullscreen) | `static.png` |
 
 ## Limitations
 
@@ -789,6 +862,28 @@ xbootsplash supports **two rendering backends**:
 | **Modern systems** | May need emulation | Native support |
 | **Multi-monitor** | No | Yes (detects connectors) |
 | **V-Sync** | No | Possible via `drmWaitVBlank` |
+
+### Why fbdev for Shutdown Splash?
+
+Even on DRM-capable systems, the **shutdown splash always uses fbdev mode**. This is because:
+
+1. **libdrm may be unavailable at shutdown time:**
+   - Filesystem teardown is in progress
+   - `/usr` may be a separate partition (already unmounted)
+   - `libdrm.so` typically resides in `/usr/lib/` → inaccessible
+   - Result: `error while loading shared libraries: libdrm.so.2`
+
+2. **DRM drivers provide fbdev fallback:**
+   - Modern DRM drivers expose `/dev/fb0` via `simpledrm` (kernel 5.14+)
+   - Or via fbdev emulation (`CONFIG_DRM_FBDEV_EMULATION=y`)
+   - The fbdev interface remains available even during shutdown
+
+3. **Static fbdev binary has zero dependencies:**
+   - No library loading required
+   - Works in degraded environments (filesystems unmounted)
+   - Guaranteed to execute successfully
+
+**Summary:** At shutdown, the environment is degraded. DRM dynamic binaries risk crash due to missing libraries. fbdev static binaries always work.
 
 ### Framebuffer Drivers (FBDev)
 

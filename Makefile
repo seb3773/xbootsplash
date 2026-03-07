@@ -14,8 +14,7 @@ NOLIBC_FLAGS = -ffreestanding -fno-builtin -nostdlib -nostartfiles \
                -fno-asynchronous-unwind-tables -fno-stack-protector \
                -fno-pic -fno-pie -fvisibility=hidden \
                -ffunction-sections -fdata-sections \
-               -flto=2 -fno-ident \
-               -DNOLIBC_NO_ARENA
+               -flto=2 -fno-ident
 
 NOLIBC_LDFLAGS = -static -nostdlib -nostartfiles \
                  -Wl,--build-id=none,--strip-all,-O1,--gc-sections \
