@@ -155,6 +155,11 @@ static int transp_warned = 0;  /* Only warn once about transparency */
 #define COMPRESS_PALETTE_LZSS 5  /* Static image: 8-bit palette + LZSS */
 static int compress_method = COMPRESS_RLE_XOR;
 
+#define MAX_FRAMES 1000
+#define MAX_IMAGE_WIDTH  8192
+#define MAX_IMAGE_HEIGHT 8192
+#define MAX_IMAGE_PIXELS ((size_t)MAX_IMAGE_WIDTH * (size_t)MAX_IMAGE_HEIGHT)
+
 /* Frame data */
 typedef struct {
     char *path;
@@ -258,17 +263,29 @@ static int compare_frames_by_path(const void *a, const void *b) {
     return strcmp(name_a, name_b);
 }
 
-/* Execute command without shell interpretation (avoids injection) */
-static int exec_cmd(const char *prog, char *const argv[]) {
+/* Absolute paths for external tools (prevents PATH hijacking) */
+#define CMD_CONVERT "/usr/bin/convert"
+#define CMD_CP      "/bin/cp"
+#define CMD_RM      "/bin/rm"
+
+/* Execute command without shell interpretation and with clean environment */
+static int exec_cmd_safe(const char *cmd_path, char *const argv[]) {
+    if (access(cmd_path, X_OK) != 0) return -1;
+
     pid_t pid = fork();
     if (pid < 0) return -1;
-    
+
     if (pid == 0) {
-        execvp(prog, argv);
+        char *const clean_env[] = {
+            (char *)"PATH=/usr/bin:/bin",
+            (char *)"HOME=/root",
+            (char *)"LANG=C",
+            NULL
+        };
+        execve(cmd_path, argv, clean_env);
         _exit(127);
     }
-    
-    /* Parent: wait for child */
+
     int status = 0;
     for (;;) {
         pid_t w = waitpid(pid, &status, 0);
@@ -337,7 +354,7 @@ static char *flatten_png(const char *path, uint32_t bg_hex, char *tmp_path, size
         NULL
     };
     
-    if (exec_cmd("convert", argv) != 0) {
+    if (exec_cmd_safe(CMD_CONVERT, argv) != 0) {
         /* Fallback: just copy without flattening */
         /* WARNING: This will cause visual distortion if PNG has alpha channel!
          * The 32bpp RGBA will be interpreted as 24bpp RGB, shifting all pixels.
@@ -346,7 +363,7 @@ static char *flatten_png(const char *path, uint32_t bg_hex, char *tmp_path, size
         fprintf(stderr, "Warning: ImageMagick convert failed for '%s'\n", path);
         fprintf(stderr, "         Transparent PNG will not be flattened - visual distortion may occur!\n");
         char *cp_argv[] = {(char *)"cp", (char *)path, tmp_path, NULL};
-        exec_cmd("cp", cp_argv);
+        exec_cmd_safe(CMD_CP, cp_argv);
     }
     
     return tmp_path;
@@ -357,6 +374,9 @@ static int load_png(const char *path, image_t *img) {
     const char *load_path = path;
     char flattened_buf[512];
     char *flattened_path = NULL;
+    png_bytep *rows = NULL;
+    int w = 0;
+    int h = 0;
     
     /* Check for transparency and flatten if needed */
     if (png_has_alpha(path)) {
@@ -402,9 +422,29 @@ static int load_png(const char *path, image_t *img) {
     
     png_init_io(png, fp);
     png_read_info(png, info);
-    
-    int w = png_get_image_width(png, info);
-    int h = png_get_image_height(png, info);
+
+    {
+        const png_uint_32 w32 = png_get_image_width(png, info);
+        const png_uint_32 h32 = png_get_image_height(png, info);
+        if (w32 == 0 || h32 == 0 || w32 > MAX_IMAGE_WIDTH || h32 > MAX_IMAGE_HEIGHT) {
+            fprintf(stderr, "Error: Image too large: %ux%u (max %dx%d)\n",
+                    (unsigned)w32, (unsigned)h32, MAX_IMAGE_WIDTH, MAX_IMAGE_HEIGHT);
+            png_destroy_read_struct(&png, &info, NULL);
+            fclose(fp);
+            if (flattened_path) unlink(flattened_path);
+            return -1;
+        }
+        if ((size_t)w32 * (size_t)h32 > MAX_IMAGE_PIXELS) {
+            fprintf(stderr, "Error: Image has too many pixels: %zu (max %zu)\n",
+                    (size_t)w32 * (size_t)h32, (size_t)MAX_IMAGE_PIXELS);
+            png_destroy_read_struct(&png, &info, NULL);
+            fclose(fp);
+            if (flattened_path) unlink(flattened_path);
+            return -1;
+        }
+        w = (int)w32;
+        h = (int)h32;
+    }
     png_byte color_type = png_get_color_type(png, info);
     png_byte bit_depth = png_get_bit_depth(png, info);
     
@@ -420,15 +460,42 @@ static int load_png(const char *path, image_t *img) {
     
     png_read_update_info(png, info);
     
-    png_bytep *rows = malloc(sizeof(png_bytep) * h);
+    rows = malloc(sizeof(png_bytep) * (size_t)h);
+    if (!rows) {
+        fprintf(stderr, "Error: Out of memory for PNG rows\n");
+        png_destroy_read_struct(&png, &info, NULL);
+        fclose(fp);
+        if (flattened_path) unlink(flattened_path);
+        return -1;
+    }
+    for (int y = 0; y < h; y++) rows[y] = NULL;
+    const size_t rowbytes = (size_t)png_get_rowbytes(png, info);
     for (int y = 0; y < h; y++) {
-        rows[y] = malloc(png_get_rowbytes(png, info));
+        rows[y] = malloc(rowbytes);
+        if (!rows[y]) {
+            fprintf(stderr, "Error: Out of memory for PNG row buffers\n");
+            for (int yy = 0; yy < y; yy++) free(rows[yy]);
+            free(rows);
+            png_destroy_read_struct(&png, &info, NULL);
+            fclose(fp);
+            if (flattened_path) unlink(flattened_path);
+            return -1;
+        }
     }
     png_read_image(png, rows);
     
     img->w = w;
     img->h = h;
-    img->pixels = malloc(w * h * sizeof(uint16_t));
+    img->pixels = malloc((size_t)w * (size_t)h * sizeof(uint16_t));
+    if (!img->pixels) {
+        fprintf(stderr, "Error: Out of memory for image %dx%d\n", w, h);
+        for (int y = 0; y < h; y++) free(rows[y]);
+        free(rows);
+        fclose(fp);
+        png_destroy_read_struct(&png, &info, NULL);
+        if (flattened_path) unlink(flattened_path);
+        return -1;
+    }
     
     for (int y = 0; y < h; y++) {
         for (int x = 0; x < w; x++) {
@@ -1059,10 +1126,10 @@ int main(int argc, char *argv[]) {
             NULL
         };
         
-        if (exec_cmd("convert", argv) != 0) {
+        if (exec_cmd_safe(CMD_CONVERT, argv) != 0) {
             /* Fallback: try without flatten */
             char *cp_argv[] = {(char *)"cp", (char *)input_path, tmp_path, NULL};
-            exec_cmd("cp", cp_argv);
+            exec_cmd_safe(CMD_CP, cp_argv);
         }
         
         image_t img;
@@ -1161,8 +1228,11 @@ int main(int argc, char *argv[]) {
             return 1;
         }
         
-        if (frame_count > 65535) {
-            fprintf(stderr, "Error: Too many frames (%d). Maximum is 65535.\n", frame_count);
+        if (frame_count > MAX_FRAMES) {
+            fprintf(stderr, "Error: Too many frames (%d). Maximum is %d.\n",
+                    frame_count, MAX_FRAMES);
+            fprintf(stderr, "For a 10-second animation at 30 FPS, you need 300 frames.\n");
+            fprintf(stderr, "Consider reducing frame count or increasing frame delay.\n");
             closedir(dir);
             return 1;
         }
@@ -1246,9 +1316,9 @@ int main(int argc, char *argv[]) {
                 NULL
             };
             
-            if (exec_cmd("convert", argv) != 0) {
+            if (exec_cmd_safe(CMD_CONVERT, argv) != 0) {
                 char *cp_argv[] = {(char *)"cp", frames[i].path, frames[i].tmp_path, NULL};
-                exec_cmd("cp", cp_argv);
+                exec_cmd_safe(CMD_CP, cp_argv);
             }
         }
         
@@ -1494,7 +1564,7 @@ int main(int argc, char *argv[]) {
 
             /* Cleanup temp directory */
             char *rm_argv[] = {(char *)"rm", (char *)"-rf", (char *)tmpdir, NULL};
-            exec_cmd("rm", rm_argv);
+            exec_cmd_safe(CMD_RM, rm_argv);
             return 0;
         } else {
             printf("#define COMPRESS_METHOD %d  /* 0=RLE_XOR, 1=RLE_DIRECT, 2=SPARSE, 3=RAW */\n", compress_method);
@@ -1584,7 +1654,7 @@ int main(int argc, char *argv[]) {
         
         /* Cleanup temp directory */
         char *rm_argv[] = {(char *)"rm", (char *)"-rf", (char *)tmpdir, NULL};
-        exec_cmd("rm", rm_argv);
+        exec_cmd_safe(CMD_RM, rm_argv);
         
     } else if (display_mode == MODE_ANIM_IMAGE_CENTER || display_mode == MODE_ANIM_IMAGE_FULL) {
         /* Animation on background image */
@@ -1610,7 +1680,7 @@ int main(int argc, char *argv[]) {
             NULL
         };
         
-        if (exec_cmd("convert", bg_argv) != 0) {
+        if (exec_cmd_safe(CMD_CONVERT, bg_argv) != 0) {
             fprintf(stderr, "Error: Failed to convert background image: %s\n", bg_image_path);
             return 1;
         }
@@ -1670,8 +1740,11 @@ int main(int argc, char *argv[]) {
             return 1;
         }
         
-        if (frame_count > 65535) {
-            fprintf(stderr, "Error: Too many frames (%d). Maximum is 65535.\n", frame_count);
+        if (frame_count > MAX_FRAMES) {
+            fprintf(stderr, "Error: Too many frames (%d). Maximum is %d.\n",
+                    frame_count, MAX_FRAMES);
+            fprintf(stderr, "For a 10-second animation at 30 FPS, you need 300 frames.\n");
+            fprintf(stderr, "Consider reducing frame count or increasing frame delay.\n");
             closedir(dir);
             return 1;
         }
@@ -1756,9 +1829,9 @@ int main(int argc, char *argv[]) {
                 NULL
             };
             
-            if (exec_cmd("convert", argv) != 0) {
+            if (exec_cmd_safe(CMD_CONVERT, argv) != 0) {
                 char *cp_argv[] = {(char *)"cp", frames[i].path, frames[i].tmp_path, NULL};
-                exec_cmd("cp", cp_argv);
+                exec_cmd_safe(CMD_CP, cp_argv);
             }
         }
         
@@ -2047,7 +2120,7 @@ int main(int argc, char *argv[]) {
             free(best_sizes);
 
             char *rm_argv[] = {(char *)"rm", (char *)"-rf", (char *)tmpdir, NULL};
-            exec_cmd("rm", rm_argv);
+            exec_cmd_safe(CMD_RM, rm_argv);
             return 0;
         } else {
             printf("#define COMPRESS_METHOD %d  /* 0=RLE_XOR, 1=RLE_DIRECT, 2=SPARSE, 3=RAW */\n", compress_method);
@@ -2134,7 +2207,7 @@ int main(int argc, char *argv[]) {
         
         /* Cleanup temp directory */
         char *rm_argv[] = {(char *)"rm", (char *)"-rf", (char *)tmpdir, NULL};
-        exec_cmd("rm", rm_argv);
+        exec_cmd_safe(CMD_RM, rm_argv);
     }
     
     return 0;

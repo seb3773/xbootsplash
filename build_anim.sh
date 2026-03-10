@@ -408,6 +408,56 @@ is_gui_session() {
     return 1
 }
 
+validate_binary() {
+    local binary="$1"
+    local metadata_file="${2:-}"
+
+    if ! file "$binary" 2>/dev/null | grep -q "ELF.*x86-64"; then
+        echo "Error: Not a valid x86-64 ELF binary" >&2
+        return 1
+    fi
+
+    local size
+    size=$(stat -c%s "$binary" 2>/dev/null || echo 0)
+    if [[ "$size" -gt 20971520 ]]; then
+        echo "Error: Binary too large ($size bytes)" >&2
+        return 1
+    fi
+
+    if [[ -n "$metadata_file" ]]; then
+        if ! _update_frame_cache "$binary" "$metadata_file"; then
+            echo "Error: Invalid watermark" >&2
+            return 1
+        fi
+    fi
+
+    if [[ -f "${binary}.minisig" ]]; then
+        if command -v minisign >/dev/null 2>&1; then
+            local pubkey="/etc/xbootsplash/minisign.pub"
+            if [[ -f "$pubkey" ]]; then
+                if ! minisign -Vm "$binary" -P "$(cat "$pubkey")" >/dev/null 2>&1; then
+                    echo "Error: Invalid signature" >&2
+                    return 1
+                fi
+            fi
+        fi
+    fi
+
+    if [[ ${USE_DRM:-0} -eq 0 ]]; then
+        if ldd "$binary" 2>&1 | grep -v "not a dynamic executable" >/dev/null 2>&1; then
+            echo "Error: fbdev binary should be static" >&2
+            return 1
+        fi
+    else
+        if ! ldd "$binary" 2>/dev/null | grep -q "libdrm"; then
+            echo "Error: DRM binary should link to libdrm" >&2
+            return 1
+        fi
+    fi
+
+    return 0
+}
+
 # Detect initramfs system
 detect_initramfs_system() {
     print_info "  ${WHITE}☉${CYAN} Detecting initramfs system..."
@@ -2281,6 +2331,11 @@ install_standard() {
             USE_DRM=0
         fi
     fi
+
+    if ! validate_binary "$binary_src" ""; then
+        echo -e "${RED}ERROR: Binary validation failed${NC}"
+        return 1
+    fi
     
     # Check initramfs-tools
     if [[ ! -d /etc/initramfs-tools ]]; then
@@ -2545,11 +2600,19 @@ INIT_TOP_EOF
     if [[ $USE_DRM -eq 0 ]]; then
         cat >> "$inittop_tmp" << 'INIT_TOP_FBDEV_WAIT'
 if [ ! -c /dev/fb0 ]; then
-    # Wait up to 1 second for framebuffer to appear
-    for i in 1 2 3 4 5; do
+    if [ ! -d /sys/class/graphics/fb0 ]; then
+        exit 0
+    fi
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
         sleep 0.2
         [ -c /dev/fb0 ] && break
     done
+    if [ ! -c /dev/fb0 ] && [ -d /sys/class/graphics/fb0 ]; then
+        mknod /dev/fb0 c 29 0 2>/dev/null || true
+    fi
+    if [ ! -c /dev/fb0 ]; then
+        exit 0
+    fi
 fi
 INIT_TOP_FBDEV_WAIT
     fi
@@ -2560,11 +2623,14 @@ INIT_TOP_FBDEV_WAIT
 if [ -x /sbin/$BINARY ]; then
     /sbin/$BINARY &
     SPLASH_PID=\$!
-    echo "\$SPLASH_PID" > /run/${BINARY}.pid
-    # Store start_time for PID recycling protection
-    # Field 22 in /proc/PID/stat is process start time in clock ticks
-    START_TIME=\$(awk '{print \$22}' /proc/\$SPLASH_PID/stat 2>/dev/null)
-    echo "\$START_TIME" > /run/${BINARY}.start_time
+    sleep 0.1
+    if [ -d "/proc/\$SPLASH_PID" ]; then
+        echo "\$SPLASH_PID" > /run/${BINARY}.pid
+        START_TIME=\$(awk '{print \$22}' /proc/\$SPLASH_PID/stat 2>/dev/null)
+        echo "\$START_TIME" > /run/${BINARY}.start_time
+    else
+        echo "Warning: $BINARY failed to start" >&2
+    fi
 fi
 INIT_TOP_EOF
     chmod +x "$inittop_tmp"
@@ -2817,6 +2883,23 @@ INIT_BOTTOM_FBDEV
         install_rollback
         return 1
     fi
+
+    if [[ ! -s "$initramfs_path" ]]; then
+        echo -e "  -> ${RED}✖ Initramfs is empty: $initramfs_path${NC}"
+        install_rollback
+        return 1
+    fi
+
+    if [[ $old_initramfs_size -gt 0 ]]; then
+        local min_size=$((old_initramfs_size * 9 / 10))
+        if [[ $new_initramfs_size -lt $min_size ]]; then
+            echo -e "  -> ${RED}✖ New initramfs is too small (corruption?)${NC}"
+            echo "     Old: $old_initramfs_size bytes"
+            echo "     New: $new_initramfs_size bytes"
+            install_rollback
+            return 1
+        fi
+    fi
     
     # Check for significant size reduction (could indicate corruption)
     if [[ $old_initramfs_size -gt 0 && $new_initramfs_size -lt $((old_initramfs_size / 2)) ]]; then
@@ -2839,11 +2922,29 @@ INIT_BOTTOM_FBDEV
     
     # Check that our binary is in the initramfs
     if command -v lsinitramfs &>/dev/null; then
+        if ! lsinitramfs "$initramfs_path" >/dev/null 2>&1; then
+            echo -e "  -> ${RED}✖ Initramfs is corrupted (cannot list)${NC}"
+            install_rollback
+            return 1
+        fi
         if lsinitramfs "$initramfs_path" 2>/dev/null | grep -q "sbin/$BINARY"; then
             echo -e "  -> ${GREEN}✓ Binary included in initramfs${NC}"
         else
-            echo -e "  -> ${YELLOW}⚠ Warning: Binary not found in initramfs${NC}"
-            echo "     Check hook script: /etc/initramfs-tools/hooks/$BINARY"
+            echo -e "  -> ${RED}✖ Binary not found in initramfs${NC}"
+            install_rollback
+            return 1
+        fi
+
+        if ! lsinitramfs "$initramfs_path" 2>/dev/null | grep -q "scripts/init-top/$BINARY"; then
+            echo -e "  -> ${RED}✖ init-top script not found in initramfs${NC}"
+            install_rollback
+            return 1
+        fi
+
+        if ! lsinitramfs "$initramfs_path" 2>/dev/null | grep -q "scripts/init-bottom/$BINARY"; then
+            echo -e "  -> ${RED}✖ init-bottom script not found in initramfs${NC}"
+            install_rollback
+            return 1
         fi
     else
         echo -e "  -> Initramfs size: $new_initramfs_size bytes (OK)"
@@ -4215,6 +4316,13 @@ install_from_package() {
             return 1
         fi
         print_success "Checksum verified"
+    fi
+
+    print_info "Validating binary..."
+    if ! validate_binary "$tmp_dir/splash_bin" "$tmp_dir/metadata.conf"; then
+        print_error "Binary validation failed"
+        rm -rf "$tmp_dir"
+        return 1
     fi
     
     # Frame cache sync check

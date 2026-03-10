@@ -309,6 +309,7 @@ static int find_watermark_scan(FILE *f, size_t *offset) {
 static int extract_background(const uint8_t *rodata, size_t rodata_size,
                               size_t *pos, int w, int h, const char *output_dir) {
     int pixels = w * h;
+    const size_t pixels_sz = (size_t)pixels;
     
     /* Try different palette sizes (256 down to 4) */
     for (int pal_size = 256; pal_size >= 4; pal_size--) {
@@ -334,15 +335,15 @@ static int extract_background(const uint8_t *rodata, size_t rodata_size,
         size_t comp_start = *pos + pal_bytes;
         size_t max_comp = rodata_size - comp_start;
         
-        if (max_comp < pixels / 8) continue;  /* Too small */
+        if (max_comp < pixels_sz / 8) continue;  /* Too small */
         
-        uint8_t *indices = malloc(pixels);
+        uint8_t *indices = malloc(pixels_sz);
         
         /* Try different compressed sizes */
-        for (size_t comp_size = pixels / 8; comp_size < max_comp && comp_size < pixels; comp_size += 128) {
-            size_t decoded = decompress_lzss(rodata + comp_start, comp_size, indices, pixels);
+        for (size_t comp_size = pixels_sz / 8; comp_size < max_comp && comp_size < pixels_sz; comp_size += 128) {
+            size_t decoded = decompress_lzss(rodata + comp_start, comp_size, indices, pixels_sz);
             
-            if (decoded == pixels) {
+            if (decoded == pixels_sz) {
                 /* Success! Convert indices to pixels via palette */
                 uint16_t *img = malloc(pixels * sizeof(uint16_t));
                 for (int i = 0; i < pixels; i++) {
@@ -377,6 +378,7 @@ static int extract_background(const uint8_t *rodata, size_t rodata_size,
 static int extract_static_image(const uint8_t *rodata, size_t rodata_size,
                                 int w, int h, const char *output_dir) {
     int pixels = w * h;
+    const size_t pixels_sz = (size_t)pixels;
     
     /* Try different palette sizes */
     for (int pal_size = 256; pal_size >= 4; pal_size--) {
@@ -393,12 +395,12 @@ static int extract_static_image(const uint8_t *rodata, size_t rodata_size,
         
         if (non_zero < pal_size / 4) continue;
         
-        uint8_t *indices = malloc(pixels);
+        uint8_t *indices = malloc(pixels_sz);
         size_t comp_size = rodata_size - pal_bytes;
         
-        size_t decoded = decompress_lzss(rodata + pal_bytes, comp_size, indices, pixels);
+        size_t decoded = decompress_lzss(rodata + pal_bytes, comp_size, indices, pixels_sz);
         
-        if (decoded == pixels) {
+        if (decoded == pixels_sz) {
             uint16_t *img = malloc(pixels * sizeof(uint16_t));
             for (int i = 0; i < pixels; i++) {
                 img[i] = palette[indices[i] < pal_size ? indices[i] : 0];
@@ -506,21 +508,41 @@ int main(int argc, char *argv[]) {
         char meta_path[512];
         snprintf(meta_path, sizeof(meta_path), "%s/metadata.txt", output_dir);
         FILE *mf = fopen(meta_path, "w");
-        if (mf) {
-            fprintf(mf, "# Xbootsplash binary metadata\n");
-            fprintf(mf, "binary=%s\n", binary_path);
-            fprintf(mf, "version=%d\n", wm.ver);
-            fprintf(mf, "mode=%d\n", wm.mode);
-            fprintf(mf, "frame_width=%d\n", wm.fw);
-            fprintf(mf, "frame_height=%d\n", wm.fh);
-            fprintf(mf, "frame_count=%d\n", wm.nf);
-            fprintf(mf, "compression=%d\n", wm.comp);
-            fprintf(mf, "frame_delay_ms=%d\n", wm.delay);
-            fprintf(mf, "loop_mode=%d\n", wm.loop);
-            fprintf(mf, "crc=0x%08X\n", wm.crc);
-            fclose(mf);
-            printf("Written: %s\n", meta_path);
+        if (!mf) {
+            fprintf(stderr, "Error: Cannot create %s\n", meta_path);
+            fclose(f);
+            return 1;
         }
+
+        int ret = 0;
+        ret |= fprintf(mf, "# Xbootsplash binary metadata\n") < 0;
+        ret |= fprintf(mf, "binary=%s\n", binary_path) < 0;
+        ret |= fprintf(mf, "version=%d\n", wm.ver) < 0;
+        ret |= fprintf(mf, "mode=%d\n", wm.mode) < 0;
+        ret |= fprintf(mf, "frame_width=%d\n", wm.fw) < 0;
+        ret |= fprintf(mf, "frame_height=%d\n", wm.fh) < 0;
+        ret |= fprintf(mf, "frame_count=%d\n", wm.nf) < 0;
+        ret |= fprintf(mf, "compression=%d\n", wm.comp) < 0;
+        ret |= fprintf(mf, "frame_delay_ms=%d\n", wm.delay) < 0;
+        ret |= fprintf(mf, "loop_mode=%d\n", wm.loop) < 0;
+        ret |= fprintf(mf, "crc=0x%08X\n", wm.crc) < 0;
+
+        if (ret != 0) {
+            fprintf(stderr, "Error: Failed to write metadata (disk full?)\n");
+            fclose(mf);
+            unlink(meta_path);
+            fclose(f);
+            return 1;
+        }
+
+        if (fclose(mf) != 0) {
+            fprintf(stderr, "Error: Failed to close file (data may be lost)\n");
+            unlink(meta_path);
+            fclose(f);
+            return 1;
+        }
+
+        printf("Written: %s\n", meta_path);
         
         /* Read frame data */
         if (rodata_size > 0 && wm.nf > 0) {
@@ -598,12 +620,12 @@ int main(int argc, char *argv[]) {
                         if (wm.comp == 1 || wm.comp == 4) {
                             /* RLE XOR */
                             size_t consumed = apply_delta_rle_xor(rodata + pos, rodata_size - pos, frame, pixels);
-                            pos += consumed > 0 ? consumed : pixels / 4;
+                            pos += consumed > 0 ? consumed : (size_t)pixels / 4;
                             extracted++;
                         } else if (wm.comp == 3) {
                             /* Sparse */
                             size_t consumed = apply_delta_sparse(rodata + pos, rodata_size - pos, frame, pixels);
-                            pos += consumed > 0 ? consumed : pixels / 8;
+                            pos += consumed > 0 ? consumed : (size_t)pixels / 8;
                             extracted++;
                         }
                     }

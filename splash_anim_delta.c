@@ -1275,11 +1275,11 @@ int main(void) {
     }
 #endif
     
+    struct timespec start_ts;
+    clock_gettime(CLOCK_MONOTONIC, &start_ts);
+
     int frame_idx = 0;
     while (!terminate_requested) {
-        /* Measure frame start time */
-        long frame_start = get_time_ms();
-        
         /* Load current frame into buffer before blitting */
         /* This ensures frame 0 is loaded fresh on loop restart, avoiding visual glitch */
         if (frame_idx == 0) {
@@ -1327,15 +1327,16 @@ int main(void) {
         if (frame_idx != 0) {
             apply_delta(frames[frame_idx], frame_sizes[frame_idx]);
         }
-        
-        /* Delta-time: subtract processing time from sleep duration */
-        long frame_end = get_time_ms();
-        long elapsed = frame_end - frame_start;
-        long sleep_time = FRAME_DURATION_MS - elapsed;
-        
-        if (sleep_time > 0) {
-            sleep_ms((unsigned int)sleep_time);
+
+        struct timespec target_ts = start_ts;
+        long long target_ns = (long long)frame_idx * (long long)FRAME_DURATION_MS * 1000000LL;
+        target_ts.tv_sec += target_ns / 1000000000LL;
+        target_ts.tv_nsec += target_ns % 1000000000LL;
+        if (target_ts.tv_nsec >= 1000000000L) {
+            target_ts.tv_sec++;
+            target_ts.tv_nsec -= 1000000000L;
         }
+        clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &target_ts, NULL);
     }
 #endif
     

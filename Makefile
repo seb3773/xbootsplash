@@ -60,6 +60,13 @@ drm: $(TARGET)_drm
 	@ls -l $(TARGET)_drm
 	@echo "Binary size: $$(stat -c%s $(TARGET)_drm) bytes (DRM mode)"
 
+generator: $(GENERATOR)
+	@ls -l $(GENERATOR)
+
+extract_frames: CFLAGS = -O2 -Wall -Wextra -Wshadow
+extract_frames: LDLIBS = -lpng -lm
+extract_frames: extract_frames.c
+
 generate: $(GENERATOR)
 	./$(GENERATOR) -o $(FRAME_OFFSET) -d $(FRAME_DELAY) $(FRAME_DIR) > frames_delta.h
 

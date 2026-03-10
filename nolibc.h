@@ -77,9 +77,12 @@ typedef long int64_t;
 #define SYS_select  23
 #define SYS_alarm   37
 #define SYS_clock_gettime 228
+ #define SYS_clock_nanosleep 230
 
 /* Clock IDs for clock_gettime */
+ #define CLOCK_MONOTONIC 1
 #define CLOCK_MONOTONIC_RAW 4
+ #define TIMER_ABSTIME 1
 
 /* Virtual Terminal ioctls - for text mode fallback */
 #define VT_ACTIVATE    0x5605  /* Activate specified VT */
@@ -285,6 +288,14 @@ struct timespec {
 
 static inline __attribute__((always_inline)) int nanosleep(const struct timespec *req, struct timespec *rem) {
     return (int)syscall2(SYS_nanosleep, (long)req, (long)rem);
+}
+
+static inline __attribute__((always_inline)) int clock_gettime(int clk_id, struct timespec *tp) {
+    return (int)syscall2(SYS_clock_gettime, (long)clk_id, (long)tp);
+}
+
+static inline __attribute__((always_inline)) int clock_nanosleep(int clk_id, int flags, const struct timespec *request, struct timespec *remain) {
+    return (int)syscall4(SYS_clock_nanosleep, (long)clk_id, (long)flags, (long)request, (long)remain);
 }
 
 /* select() for timeout on blocking operations */
