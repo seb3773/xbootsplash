@@ -982,15 +982,27 @@ select_mode() {
     echo -e "  ${YELLOW_GRAD3}│      ${YELLOW}→ Single static image centered on uniform color${NC}                         ${YELLOW_GRAD3}│"
     echo -e "  ${YELLOW_GRAD3}│  ${CYAN}5)${NC} Static image full screen                                                 ${YELLOW_GRAD3}│"
     echo -e "  ${YELLOW_GRAD3}│      ${YELLOW}→ Single static image filling the screen${NC}                                ${YELLOW_GRAD3}│"
+    echo -e "  ${YELLOW_GRAD3}│  ${CYAN}B)${NC} Back to main menu                                                        ${YELLOW_GRAD3}│"
+    echo -e "  ${YELLOW_GRAD3}│  ${CYAN}Q)${NC} Quit                                                                      ${YELLOW_GRAD3}│"
     echo -e "  ${YELLOW_GRAD3}┕━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┙"
-    echo -en "  ${YELLOW}➤ Select mode [${CYAN}1${YELLOW}]: ${NC}"
+    local default_mode_num=$((DISPLAY_MODE + 1))
+    [ $default_mode_num -lt 1 ] && default_mode_num=1
+    [ $default_mode_num -gt 5 ] && default_mode_num=1
+    echo -en "  ${YELLOW}➤ Select mode [${CYAN}$default_mode_num${YELLOW}]: ${NC}"
     read -r mode_choice
     
     case "$mode_choice" in
+        [Bb]) return 1 ;;
+        [Qq])
+            print_info "Operation cancelled by user."
+            exit 0
+            ;;
         2) DISPLAY_MODE=1 ;;
         3) DISPLAY_MODE=2 ;;
         4) DISPLAY_MODE=3 ;;
         5) DISPLAY_MODE=4 ;;
+        1) DISPLAY_MODE=0 ;;
+        "") DISPLAY_MODE=$((default_mode_num - 1)) ;;
         *) DISPLAY_MODE=0 ;;
     esac
     
@@ -1002,14 +1014,24 @@ select_mode() {
     # Mode-specific prompts
     # Modes 1 and 2: need background image
     if [ $DISPLAY_MODE -eq 1 ] || [ $DISPLAY_MODE -eq 2 ]; then
-        if [ -z "$BG_IMAGE" ]; then
-            echo -e "\n${YELLOW}Enter background image path (PNG/JPG): ${NC}"
-            read -r BG_IMAGE
-            if [ ! -f "$BG_IMAGE" ]; then
-                print_error "Background image not found: $BG_IMAGE"
-                exit 1
+        while true; do
+            local bg_prompt=""
+            [ -n "$BG_IMAGE" ] && bg_prompt=" [default: $BG_IMAGE]"
+            echo -en "\n${YELLOW}Enter background image path (PNG/JPG)${bg_prompt} [or 'B' for Back]: ${NC}"
+            read -r bg_input
+            if [[ "$bg_input" =~ ^[Bb]$ ]]; then
+                return 1
             fi
-        fi
+            if [ -n "$bg_input" ]; then
+                BG_IMAGE="${bg_input/#\~/$HOME}"
+            fi
+            if [ -f "$BG_IMAGE" ]; then
+                break
+            else
+                print_error "Background image not found: $BG_IMAGE"
+                BG_IMAGE=""
+            fi
+        done
     fi
     
     # Mode 2 (fullscreen anim): target resolution for background
@@ -1039,6 +1061,7 @@ select_mode() {
             fi
         fi
     fi
+    return 0
 }
 
 # Get build parameters
@@ -1046,7 +1069,7 @@ get_parameters() {
     print_step "4" "Configure display parameters"
     
     # Select coordinate system
-    local COORD_MODE=0  # 0=offsets, 1=absolute coordinates
+    local COORD_MODE=${COORD_MODE:-0}  # 0=offsets, 1=absolute coordinates
     echo ""
     echo -e "  ${BOLD}Select a coordinates system:${NC}"
     echo ""
@@ -1055,12 +1078,13 @@ get_parameters() {
     echo -e "      offsets from these centered positions."
     echo -e "  ${CYAN}2)${NC} ${BOLD}Coordinates mode:${NC}"
     echo -e "      You specify absolute coordinates for each element."
-    echo -en "  ${YELLOW}➤ Select coordinates system [${CYAN}1${YELLOW}]: ${NC}"
+    echo -en "  ${YELLOW}➤ Select coordinates system [${CYAN}$((COORD_MODE + 1))${YELLOW}]: ${NC}"
     read -r coord_choice
     
     case "$coord_choice" in
         2) COORD_MODE=1 ;;
-        *) COORD_MODE=0 ;;
+        1) COORD_MODE=0 ;;
+        *) ;; # Keep previous COORD_MODE
     esac
     
     if [ $COORD_MODE -eq 0 ]; then
@@ -1485,6 +1509,13 @@ get_parameters() {
             local dir_status="normal"
             [ $INVERT_FRAMES -eq 1 ] && { dir_text="N→0"; dir_status="inverted"; }
             
+            local default_loop=1
+            case $LOOP_MODE in
+                0) default_loop=2 ;;
+                2) default_loop=3 ;;
+                *) default_loop=1 ;;
+            esac
+
             echo -e "\n${BOLD}   ${WHITE}♺ ${YELLOW}Animation loop mode:${NC}"
             echo -e "  ${YELLOW_GRAD2}╭───────────────────────────────────────────────────────────────╮"
             echo -e "  ${YELLOW_GRAD2}│  ${YELLOW}1)${NC} ${BOLD}Full loop${NC}     - Play ${dir_text}, then restart from first         ${YELLOW_GRAD2}│"
@@ -1492,7 +1523,7 @@ get_parameters() {
             echo -e "  ${YELLOW_GRAD2}│  ${YELLOW}3)${NC} ${BOLD}Partial loop${NC}  - Play ${dir_text}, then loop from frame X          ${YELLOW_GRAD2}│"
             echo -e "  ${YELLOW_GRAD2}│  ${BOLD}${CYAN}I)${NC} ${BOLD}Invert frames direction${NC} - current: ${dir_text} (${dir_status})${NC}           ${YELLOW_GRAD2}│"
             echo -e "  ${YELLOW_GRAD2}┕━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┙"
-            echo -en "  ${YELLOW} ➤ Loop mode [${CYAN}1${YELLOW}]: "
+            echo -en "  ${YELLOW} ➤ Loop mode [${CYAN}$default_loop${YELLOW}]: "
             read -r input
             
             case "$input" in
@@ -1501,19 +1532,33 @@ get_parameters() {
                     INVERT_FRAMES=$((1 - INVERT_FRAMES))
                     # Re-display menu
                     ;;
+                1)
+                    LOOP_MODE=1
+                    break
+                    ;;
                 2)
                     LOOP_MODE=0
                     break
                     ;;
                 3)
                     LOOP_MODE=2
-                    echo -n "  Loop start frame (0-$((frame_count-1))): "
+                    local def_start=${LOOP_START:-0}
+                    echo -n "  Loop start frame (0-$((frame_count-1))) [${def_start}]: "
                     read -r start_input
                     if [ -n "$start_input" ] && [[ "$start_input" =~ ^[0-9]+$ ]] && [ "$start_input" -ge 0 ] && [ "$start_input" -lt "$frame_count" ]; then
                         LOOP_START="$start_input"
                     else
-                        LOOP_START=0
+                        LOOP_START="$def_start"
                     fi
+                    break
+                    ;;
+                "")
+                    # Keep default
+                    case $default_loop in
+                        2) LOOP_MODE=0 ;;
+                        3) LOOP_MODE=2 ;;
+                        *) LOOP_MODE=1 ;;
+                    esac
                     break
                     ;;
                 *)
@@ -1558,7 +1603,9 @@ get_parameters() {
     
     # Determine default name based on source
     local default_name
-    if [ $DISPLAY_MODE -le 2 ]; then
+    if [ -n "$BINARY" ]; then
+        default_name="$BINARY"
+    elif [ $DISPLAY_MODE -le 2 ]; then
         # Animation mode: use frame directory name
         local dir_name
         if [ -d "$FRAME_DIR" ]; then
@@ -1634,9 +1681,36 @@ get_parameters() {
     echo -e "${BOLD}${CYAN}  ════════════════════════════════════════════════════════════════${NC}"
     
     if ! ask_yes_no "➤ Build with these parameters?"; then
-        echo -e "\n${YELLOW}Returning to mode selection...${NC}"
-        return 1  # Signal to restart from STEP 2
+        echo ""
+        local current_name
+        if [ -d "$FRAME_DIR" ] || [ -f "$FRAME_DIR" ]; then
+            current_name="$(basename "$FRAME_DIR")"
+            [ ${#current_name} -gt 25 ] && current_name="${current_name:0:22}..."
+        else
+            current_name="current"
+        fi
+        local line1="  │  1) Re-adjust parameters (keep: $current_name)"
+        local pad1=$((65 - ${#line1}))
+        [ $pad1 -lt 1 ] && pad1=1
+        echo -e "  ${YELLOW_GRAD3}╭─────────────────────────────────────────────────────────────────╮${NC}"
+        echo -e "  ${YELLOW_GRAD3}│  ${CYAN}1)${NC} ${BOLD}Re-adjust parameters${NC} (keep: ${BOLD}${current_name}${NC})$(printf '%*s' $pad1 '')${YELLOW_GRAD3}│${NC}"
+        echo -e "  ${YELLOW_GRAD3}│  ${CYAN}2)${NC} ${BOLD}Change frames directory / image${NC} (Step 3)                  ${YELLOW_GRAD3}│${NC}"
+        echo -e "  ${YELLOW_GRAD3}│  ${CYAN}3)${NC} ${BOLD}Change splash mode${NC} (Step 2)                               ${YELLOW_GRAD3}│${NC}"
+        echo -e "  ${YELLOW_GRAD3}│  ${CYAN}Q)${NC} ${BOLD}Quit script${NC}                                               ${YELLOW_GRAD3}│${NC}"
+        echo -e "  ${YELLOW_GRAD3}╰─────────────────────────────────────────────────────────────────╯${NC}"
+        echo -en "  ${YELLOW}➤ Select action [${CYAN}1${YELLOW}]: ${NC}"
+        read -r param_action
+        case "$param_action" in
+            2) return 2 ;;
+            3) return 3 ;;
+            [Qq])
+                print_info "Operation cancelled by user."
+                exit 0
+                ;;
+            *) return 1 ;;
+        esac
     fi
+    return 0
 }
 
 # Build animation
@@ -5683,137 +5757,121 @@ show_main_menu() {
             ;;
     esac
     
-    # Select mode FIRST so we know what type of input to expect
-    select_mode
-    
-    while true; do
-        # Get input if not already provided via argument or if previous attempt failed
-        if [ -z "$FRAME_DIR" ] || [ ! -e "$FRAME_DIR" ]; then
-            if [ $DISPLAY_MODE -eq 3 ] || [ $DISPLAY_MODE -eq 4 ]; then
-                echo -en "\n   ${YELLOW}➤ Enter the path to the static image (PNG/JPG) [or 'Q' to quit]: ${NC}\n     >${BOLD} "
-            else
-                 echo -en "\n   ${YELLOW}➤ Enter the directory containing frame images [or 'Q' to quit]: ${NC}\n     >${BOLD} "
-            fi
-            read -r FRAME_DIR
-            [ -z "$FRAME_DIR" ] && continue
-        fi
-        
-        # Check for quit
-        if [[ "$FRAME_DIR" =~ ^[Qq]$ ]]; then
-            print_info "Operation cancelled by user."
-                        print_info " "
-            print_info "                    ()_()       "
-            print_info "                    (o o)       "
-            print_info "             ---ooO-- o --Ooo---"
-            print_info " "
-            print_info "                  Goodbye !!"
-            print_info " "
-            exit 0
-        fi
-        
-        # Expand path
-        FRAME_DIR="${FRAME_DIR/#\~/$HOME}"
-        
-        # Validate input based on mode
-        if [ $DISPLAY_MODE -eq 3 ] || [ $DISPLAY_MODE -eq 4 ]; then
-            # Static image mode - expect a file
-            if [ ! -f "$FRAME_DIR" ]; then
-                print_error "Image file not found: $FRAME_DIR"
-                FRAME_DIR="" # Reset to prompt again
-                continue
-            fi
-            print_success "Image found: $FRAME_DIR"
-            break
-        else
-            # Animation mode - expect a directory
-            if [ ! -d "$FRAME_DIR" ]; then
-                print_error "Directory not found: $FRAME_DIR"
-                FRAME_DIR="" # Reset to prompt again
-                continue
-            fi
-            
-            if analyze_frames "$FRAME_DIR"; then
-                if ask_continue "${YELLOW}  ➤ Proceed with these frames ?"; then
-                    break
-                else
-            print_info "                    .:::.           "
-            print_info "                   :(o o):      "
-            print_info "             ---ooO--(_)--Ooo---"
-            print_info " "
-            print_info "                  Goodbye !!"
-            print_info " "
-                    exit 0
+    # Interactive flow with step navigation
+    local current_step=2
+    while [ $current_step -lt 5 ]; do
+        case $current_step in
+            2)
+                # STEP 2: Select display mode
+                if ! select_mode; then
+                    # Back to main menu
+                    show_main_menu
+                    return
                 fi
-            else
-                FRAME_DIR="" # Reset to prompt again
-                continue
-            fi
-        fi
-    done
-    
-    # Get parameters - if user declines, restart from mode selection
-    while ! get_parameters; do
-        # User declined parameters - restart from STEP 2
-        select_mode
-        FRAME_DIR=""
-        while true; do
-            if [ -z "$FRAME_DIR" ] || [ ! -e "$FRAME_DIR" ]; then
+                current_step=3
+                ;;
+            3)
+                # STEP 3: Frames directory / image selection & analysis
+                local default_prompt=""
+                [ -n "$FRAME_DIR" ] && default_prompt=" [default: $FRAME_DIR]"
+                
+                local prompt_text
                 if [ $DISPLAY_MODE -eq 3 ] || [ $DISPLAY_MODE -eq 4 ]; then
-                    echo -en "\n   ${YELLOW}➤ Enter the path to the static image (PNG/JPG) [or 'Q' to quit]: ${NC}"
+                    prompt_text="\n   ${YELLOW}➤ Enter the path to the static image (PNG/JPG)${default_prompt} [or 'B' for Back, 'Q' to quit]: ${NC}\n     >${BOLD} "
                 else
-                    echo -en "\n   ${YELLOW}➤ Enter the directory containing frame images [or 'Q' to quit]: ${NC}"
+                    prompt_text="\n   ${YELLOW}➤ Enter the directory containing frame images${default_prompt} [or 'B' for Back, 'Q' to quit]: ${NC}\n     >${BOLD} "
                 fi
-                read -r FRAME_DIR
-                [ -z "$FRAME_DIR" ] && continue
-            fi
-            
-            if [[ "$FRAME_DIR" =~ ^[Qq]$ ]]; then
-                print_info "Operation cancelled by user."
-            print_info "                      ___          "      
-            print_info "                     /_\ *          "
-            print_info "                    (o o)       "
-            print_info "             ---ooO--(_)--Ooo---"
-            print_info " "
-            print_info "                  Goodbye !!"
-            print_info " "
-                exit 0
-            fi
-            
-            FRAME_DIR="${FRAME_DIR/#\~/$HOME}"
-            
-            if [ $DISPLAY_MODE -eq 3 ] || [ $DISPLAY_MODE -eq 4 ]; then
-                if [ ! -f "$FRAME_DIR" ]; then
-                    print_error "Image file not found: $FRAME_DIR"
-                    FRAME_DIR=""
-                    continue
-                fi
-                print_success "Image found: $FRAME_DIR"
-                break
-            else
-                if [ ! -d "$FRAME_DIR" ]; then
-                    print_error "Directory not found: $FRAME_DIR"
-                    FRAME_DIR=""
+                
+                echo -en "$prompt_text"
+                local input_dir
+                read -r input_dir
+                
+                if [[ "$input_dir" =~ ^[Qq]$ ]]; then
+                    print_info "Operation cancelled by user."
+                    exit 0
+                elif [[ "$input_dir" =~ ^[Bb]$ ]]; then
+                    current_step=2
                     continue
                 fi
                 
-                if analyze_frames "$FRAME_DIR"; then
-                    if ask_continue "${YELLOW}  ➤ Proceed with these frames ?"; then
-                        break
-                    else
-            print_info "                   __MMM__         "
-            print_info "                    (o o)       "
-            print_info "             ---ooO--(_)--Ooo---"
-            print_info " "
-            print_info "                  Goodbye !!"
-            print_info " "
-                        exit 0
-                    fi
-                else
-                    FRAME_DIR=""
+                if [ -n "$input_dir" ]; then
+                    FRAME_DIR="${input_dir/#\~/$HOME}"
+                fi
+                
+                if [ -z "$FRAME_DIR" ]; then
                     continue
                 fi
-            fi
-        done
+                
+                if [ $DISPLAY_MODE -eq 3 ] || [ $DISPLAY_MODE -eq 4 ]; then
+                    if [ ! -f "$FRAME_DIR" ]; then
+                        print_error "Image file not found: $FRAME_DIR"
+                        FRAME_DIR=""
+                        continue
+                    fi
+                    print_success "Image found: $FRAME_DIR"
+                    current_step=4
+                else
+                    if [ ! -d "$FRAME_DIR" ]; then
+                        print_error "Directory not found: $FRAME_DIR"
+                        FRAME_DIR=""
+                        continue
+                    fi
+                    
+                    if analyze_frames "$FRAME_DIR"; then
+                        echo ""
+                        echo -en "${YELLOW}  ➤ Proceed with these frames? [${CYAN}Y${YELLOW}/n/b/q]: ${NC}"
+                        read -r proceed_choice
+                        case "$proceed_choice" in
+                            [bB])
+                                current_step=2
+                                continue
+                                ;;
+                            [qQ])
+                                print_info "Operation cancelled by user."
+                                exit 0
+                                ;;
+                            [nN]*)
+                                print_info "Select another frames directory."
+                                FRAME_DIR=""
+                                continue
+                                ;;
+                            *)
+                                current_step=4
+                                ;;
+                        esac
+                    else
+                        FRAME_DIR=""
+                        continue
+                    fi
+                fi
+                ;;
+            4)
+                # STEP 4: Configure display parameters
+                get_parameters
+                local param_ret=$?
+                case $param_ret in
+                    0)
+                        # Parameters confirmed, proceed to build!
+                        current_step=5
+                        ;;
+                    1)
+                        # Re-adjust parameters (stay in step 4 with current frames)
+                        current_step=4
+                        ;;
+                    2)
+                        # Change frames directory (back to step 3)
+                        current_step=3
+                        ;;
+                    3)
+                        # Change mode (back to step 2)
+                        current_step=2
+                        ;;
+                    *)
+                        current_step=4
+                        ;;
+                esac
+                ;;
+        esac
     done
     
     build_animation
