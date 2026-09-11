@@ -2379,7 +2379,8 @@ install_standard() {
     
     # Rollback function for trap handler
     install_rollback() {
-        local exit_code=$?
+        local exit_code=${1:-$?}
+        [[ $exit_code -eq 0 ]] && exit_code=1
         # Disable set -e to prevent cascading failures during rollback
         set +e
         # Disarm traps immediately to prevent double-trigger on exit
@@ -2909,44 +2910,53 @@ INIT_BOTTOM_FBDEV
         echo "     This could indicate corruption or missing modules."
     fi
     
-    # Verify initramfs is readable (basic integrity check)
-    # Support gzip, lz4, zstd (Fedora 40+), and xz compression
-    if ! zcat "$initramfs_path" >/dev/null 2>&1 && \
-       ! unlz4 "$initramfs_path" >/dev/null 2>&1 && \
-       ! zstd -d "$initramfs_path" -o /dev/null 2>/dev/null && \
-       ! xz -d < "$initramfs_path" >/dev/null 2>&1; then
-        echo -e "  -> ${RED}✖ Initramfs appears corrupted (cannot decompress)${NC}"
-        install_rollback
-        return 1
-    fi
-    
-    # Check that our binary is in the initramfs
+    # Verify initramfs integrity and content
     if command -v lsinitramfs &>/dev/null; then
         if ! lsinitramfs "$initramfs_path" >/dev/null 2>&1; then
-            echo -e "  -> ${RED}✖ Initramfs is corrupted (cannot list)${NC}"
-            install_rollback
+            echo -e "  -> ${RED}✖ Initramfs is corrupted (cannot list/decompress)${NC}"
+            install_rollback 1
             return 1
         fi
         if lsinitramfs "$initramfs_path" 2>/dev/null | grep -q "sbin/$BINARY"; then
             echo -e "  -> ${GREEN}✓ Binary included in initramfs${NC}"
         else
             echo -e "  -> ${RED}✖ Binary not found in initramfs${NC}"
-            install_rollback
+            install_rollback 1
             return 1
         fi
 
         if ! lsinitramfs "$initramfs_path" 2>/dev/null | grep -q "scripts/init-top/$BINARY"; then
             echo -e "  -> ${RED}✖ init-top script not found in initramfs${NC}"
-            install_rollback
+            install_rollback 1
             return 1
         fi
 
         if ! lsinitramfs "$initramfs_path" 2>/dev/null | grep -q "scripts/init-bottom/$BINARY"; then
             echo -e "  -> ${RED}✖ init-bottom script not found in initramfs${NC}"
-            install_rollback
+            install_rollback 1
+            return 1
+        fi
+    elif command -v lsinitrd &>/dev/null; then
+        if ! lsinitrd "$initramfs_path" >/dev/null 2>&1; then
+            echo -e "  -> ${RED}✖ Initramfs is corrupted (lsinitrd failed)${NC}"
+            install_rollback 1
             return 1
         fi
     else
+        # Fallback for systems without lsinitramfs/lsinitrd:
+        # Check direct compression only if not an uncompressed early-CPIO (e.g. CPU microcode)
+        local magic=""
+        magic=$(head -c 6 "$initramfs_path" 2>/dev/null)
+        if [[ "$magic" != "070701" && "$magic" != "070702" ]]; then
+            if ! zcat "$initramfs_path" >/dev/null 2>&1 && \
+               ! lz4 -t "$initramfs_path" >/dev/null 2>&1 && \
+               ! zstd -t "$initramfs_path" 2>/dev/null && \
+               ! xz -t "$initramfs_path" >/dev/null 2>&1; then
+                echo -e "  -> ${RED}✖ Initramfs appears corrupted (cannot decompress)${NC}"
+                install_rollback 1
+                return 1
+            fi
+        fi
         echo -e "  -> Initramfs size: $new_initramfs_size bytes (OK)"
     fi
     
