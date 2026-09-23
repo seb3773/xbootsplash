@@ -11,7 +11,7 @@ sudo apt install ./xbs-mytheme_1.0_amd64.deb
 This automatically registers the initramfs hooks and rebuilds the initramfs via `update-initramfs -u`.
 
 ### Option B: Visual Studio (xbootsplash-gui)
-1. Launch `./GUI_src/build/xbootsplash-gui`
+1. Launch `./GUI_src/build/xbootsplash-gui` (or the portable `./xbootsplash-gui-x86_64.AppImage`)
 2. Open the Package Inspector (`File -> Inspect / Install .xbs Package...`)
 3. Click **Install Bootsplash**
 

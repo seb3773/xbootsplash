@@ -418,11 +418,22 @@ xbootsplash/
 Built with **Trinity Qt3 (TQt3)** for fast startup, responsive rendering, and zero bloat. For an interactive visual workflow with real-time positioning, eyedropper color selection, theme browsing, live hardware preview, and 1-click `.deb` package generation:
 
 ```bash
-# Build the GUI (one-time setup)
+# Build the GUI binary
 ./GUI_src/build.sh
+# Or from root: make gui
+
+# Build portable standalone AppImage (zero-dependency on host TDE/TQt3)
+./build_appimage.sh
+# Or: make appimage  -> produces xbootsplash-gui-x86_64.AppImage
+
+# Build native Debian/Ubuntu installer package
+./build_deb.sh
+# Or: make deb       -> produces xbootsplash-gui_1.0.0_amd64.deb
 
 # Launch the visual studio
 ./GUI_src/build/xbootsplash-gui
+# Or run the AppImage anywhere:
+./xbootsplash-gui-x86_64.AppImage
 ```
 
 Key Studio Features:

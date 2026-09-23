@@ -48,7 +48,7 @@ FRAME_DELAY ?= 33
 # Build mode detection
 USE_DRM ?= 0
 
-.PHONY: all clean debug debug_x test test_ioctl test_mmap test_simple test_frame test_pattern test_debug test_rgb test_frame0 test_square generate drm fbdev generator
+.PHONY: all clean debug debug_x test test_ioctl test_mmap test_simple test_frame test_pattern test_debug test_rgb test_frame0 test_square generate drm fbdev generator gui appimage deb cli
 
 # Default: build fbdev version (backward compatible)
 all: fbdev
@@ -182,3 +182,16 @@ clean:
 
 distclean: clean
 	rm -f $(GENERATOR) frames_delta.h
+
+# GUI Studio build & packaging targets
+gui:
+	./GUI_src/build.sh
+
+appimage:
+	./build_appimage.sh
+
+deb:
+	./build_deb.sh
+
+cli:
+	./build_cli.sh

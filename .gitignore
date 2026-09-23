@@ -4,8 +4,13 @@ xbootsplash_drm
 extract_frames
 *.o
 *.a
+*.deb
+*.AppImage
+*.tar.gz
 build.log
 frames_delta.h
+binaries/
+GUI_src/build/
 
 # Desktop & editor files
 .directory

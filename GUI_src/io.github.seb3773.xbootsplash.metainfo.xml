@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.seb3773.xbootsplash</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-2.0-or-later</project_license>
+  <name>XBootsplash Studio</name>
+  <summary>Interactive visual studio for ultra-fast Linux boot splashes</summary>
+  <description>
+    <p>
+      XBootsplash Studio is an autonomous, lightweight graphical environment built
+      with Trinity Qt3 for designing, previewing, and packaging ultra-compact boot splashes.
+    </p>
+  </description>
+  <launchable type="desktop-id">xbootsplash-gui.desktop</launchable>
+  <url type="homepage">https://github.com/seb3773/xbootsplash</url>
+  <content_rating type="oars-1.1" />
+  <provides>
+    <binary>xbootsplash-gui</binary>
+  </provides>
+</component>
