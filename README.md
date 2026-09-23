@@ -415,7 +415,7 @@ xbootsplash/
 
 ### Graphical Studio (xbootsplash-gui)
 
-Built with **Trinity Qt3 (TQt3)** for fast startup, responsive rendering, and zero bloat. For an interactive visual workflow with real-time positioning, eyedropper color selection, theme browsing, live hardware preview, and 1-click `.deb` package generation:
+Built with **Trinity Qt3 (TQt3)** for fast startup, responsive rendering, and zero bloat. For an interactive visual workflow with real-time positioning, eyedropper color selection, theme browsing, live hardware preview, and 1-click `.deb` package generation (*see [screenshots gallery](#graphical-studio-gallery) below*):
 
 ```bash
 # Build the GUI binary
@@ -1592,6 +1592,13 @@ Another planned architectural evolution is the creation of a **single, unified, 
   1. **Single Universal Binary**: One ~40 KB static executable for both early Boot (with automatic fallback) and late Shutdown (no risk of shared library unmount crashes).
   2. **100% Freestanding & Static**: Zero external library dependencies (`libc`, `libdrm`), eliminating package management complexity.
   3. **Best of Both Worlds**: Tear-free hardware VSync when KMS is ready, and guaranteed universal display compatibility everywhere else.
+
+## Graphical Studio Gallery
+
+| | | |
+|:---:|:---:|:---:|
+| <a href="screenshots/screenshot_1.jpg"><img src="screenshots/screenshot_1.jpg" alt="Studio Main Window" width="100%"/></a><br/><sub><b>Main Studio Interface</b><br/>Display modes, canvas preview, and collapsible control panels</sub> | <a href="screenshots/screenshot_3.jpg"><img src="screenshots/screenshot_3.jpg" alt="Position & Alignment" width="100%"/></a><br/><sub><b>Position & Alignment</b><br/>Interactive bounding box, real-time positioning, and crosshairs</sub> | <a href="screenshots/screenshot_6.jpg"><img src="screenshots/screenshot_6.jpg" alt="Multi-Layer Composition" width="100%"/></a><br/><sub><b>Multi-Layer Composition</b><br/>Background image, animation placement, and loop control</sub> |
+| <a href="screenshots/screenshot_4.jpg"><img src="screenshots/screenshot_4.jpg" alt="Build Pipeline" width="100%"/></a><br/><sub><b>1-Click Build Engine</b><br/>Embedded compiler integration and binary size reporting</sub> | <a href="screenshots/screenshot_5.jpg"><img src="screenshots/screenshot_5.jpg" alt="Live Hardware VT Test" width="100%"/></a><br/><sub><b>Live VT Testing</b><br/>Instant full-screen hardware test on Linux virtual terminal</sub> | <a href="screenshots/screenshot_2.jpg"><img src="screenshots/screenshot_2.jpg" alt="Package Inspector" width="100%"/></a><br/><sub><b>Package Inspector</b><br/>Animated GIF preview, package inspection, and .deb export</sub> |
 
 ## Credits & Acknowledgments
 
