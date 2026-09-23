@@ -66,10 +66,10 @@ Tested/compatible with:
 
 - **5 Display Modes**: Animation or static image, with solid color or background image
 - **Zero Dependencies** (fbdev): Freestanding binary, no libc required
-- **Minimal Size**: 13 KB (fbdev static) to 29-80 KB (animation) or 35-285 KB (DRM dynamic)
+- **Minimal Size**: 13 KB (fbdev static) to 29–80 KB (animations) or 35–285 KB (DRM dynamic). Rich or cinematic boot animations with dozens of complex frames or full-screen backgrounds can comfortably reach ~1 MB if desired, while remaining completely negligible in memory and initramfs footprint.
 - **Dual Backend**: fbdev (legacy) and DRM/KMS (modern) support
 - **Live Hardware VT Preview**: Test splash screens directly on physical display hardware (`/dev/fb0` or DRM/KMS) at native refresh rates without rebooting or altering initramfs, backed by an automated 10-second fail-safe watchdog and instant keyboard exit
-- **Autonomous GUI Studio**: Modern Qt-based visual studio (`xbootsplash-gui`) with real-time composite canvas, eyedropper color picker, package inspector, and an embedded hardware test runner (100% self-contained single executable)
+- **Autonomous GUI Studio**: Fast and lightweight TQt3-based visual studio (`xbootsplash-gui`) with real-time composite canvas, eyedropper color picker, package inspector, and an embedded hardware test runner (100% self-contained single executable)
 - **Dual Super-Compression (ZX0 & UPKR)**:
   - **ZX0 Super-pack**: Elias-gamma variable-length coding, ultra-fast microsecond decode rate (>340 MB/s), 0-byte RAM state
   - **UPKR Super-pack**: Modern LZ + rANS adaptive entropy coding, delivering an additional **15% to 25% size reduction vs ZX0**
@@ -395,7 +395,7 @@ xbootsplash/
 ├── CLI_src/                # Interactive builder & extraction tools
 │   ├── build_anim.sh       # Interactive builder + installer script
 │   └── extract_frames.c    # Extraction tool (binary → PNG frames)
-├── GUI_src/                # Graphical Studio (Qt/TQt source, embedded runner & assets)
+├── GUI_src/                # Graphical Studio (TQt3 source, embedded runner & assets)
 ├── zx0/                    # ZX0 compressor (C) & zero-libc freestanding decompressor
 ├── upkr/                   # UPKR compressor (C) & zero-libc freestanding decompressor
 ├── datas/                  # Library of 50+ sample animation frame sequences (PNG)
@@ -415,7 +415,7 @@ xbootsplash/
 
 ### Graphical Studio (xbootsplash-gui)
 
-For an interactive visual workflow with real-time positioning, eyedropper color selection, theme browsing, live hardware preview, and 1-click `.deb` package generation:
+Built with **Trinity Qt3 (TQt3)** for fast startup, responsive rendering, and zero bloat. For an interactive visual workflow with real-time positioning, eyedropper color selection, theme browsing, live hardware preview, and 1-click `.deb` package generation:
 
 ```bash
 # Build the GUI (one-time setup)
