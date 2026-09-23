@@ -66,60 +66,87 @@ Tested/compatible with:
 
 - **5 Display Modes**: Animation or static image, with solid color or background image
 - **Zero Dependencies** (fbdev): Freestanding binary, no libc required
-- **Minimal Size**: 13 KB (fbdev static) to 80 KB (animation) or ~285 KB (DRM dynamic)
+- **Minimal Size**: 13 KB (fbdev static) to 29-80 KB (animation) or 35-285 KB (DRM dynamic)
 - **Dual Backend**: fbdev (legacy) and DRM/KMS (modern) support
+- **Live Hardware VT Preview**: Test splash screens directly on physical display hardware (`/dev/fb0` or DRM/KMS) at native refresh rates without rebooting or altering initramfs, backed by an automated 10-second fail-safe watchdog and instant keyboard exit
+- **Autonomous GUI Studio**: Modern Qt-based visual studio (`xbootsplash-gui`) with real-time composite canvas, eyedropper color picker, package inspector, and an embedded hardware test runner (100% self-contained single executable)
+- **Dual Super-Compression (ZX0 & UPKR)**:
+  - **ZX0 Super-pack**: Elias-gamma variable-length coding, ultra-fast microsecond decode rate (>340 MB/s), 0-byte RAM state
+  - **UPKR Super-pack**: Modern LZ + rANS adaptive entropy coding, delivering an additional **15% to 25% size reduction vs ZX0**
+- **Native Debian (.deb) Packaging**: 1-click generation of installable `.deb` packages with automatic `update-initramfs` triggers on installation (`apt install ./splash.deb`) and removal
 - **Auto-detection**: Frame indices, dimensions, optimal compression
-- **Interactive Builder**: Guided setup with validation
+- **Interactive Builder & Visual Studio**: Guided CLI setup with validation or full graphical suite
 - **SSE2 Optimized**: Fast RGB565→RGB8888 conversion for 32bpp framebuffers
 - **Graceful Shutdown**: SIGTERM/SIGINT handler for clean exit
 - **Custom Binary Names**: Install multiple splash screens with unique names (xbs_*)
-- **Package System**: Export and install distributable .xbs theme packages
+- **Package System (.xbs)**: Export and install distributable theme packages with smart visual previews (lossless PNG for static images, animated GIF for animations)
+- **Visual Package Inspector**: Browse `.xbs` packages with fluid, uncropped 16:9 real-time animated preview, inspect metadata, test on hardware, install directly, or convert to `.deb`
 - **Binary Extraction**: Extract frames and images from compiled xbs_* binaries
 - **Dual Coordinate Systems**: Position elements by offsets from center or absolute coordinates
 
-## Package System (.xbs)
+## Package System (.xbs & .deb)
 
-xbootsplash supports a simple package format for distributing themes. A `.xbs` file is a tar.gz archive containing a pre-built splash binary ready for installation.
+xbootsplash provides two distribution formats: universal `.xbs` archives and native Debian `.deb` packages.
 
-### Package Format
+### 1. Universal Theme Package (.xbs)
+
+A `.xbs` file is a portable tar.gz archive containing a pre-compiled splash binary and metadata, ready for instant inspection, testing, or installation.
 
 ```
 theme_drm_1920x1080.xbs
-├── splash_bin        # Pre-compiled binary
-├── metadata.conf     # Theme information (Bash-parseable)
-└── preview.gif       # Preview image
+├── splash_bin                 # Pre-compiled binary
+├── metadata.conf              # Theme information (Bash-parseable)
+└── preview.gif / preview.png  # Visual preview (animated GIF or static PNG)
 ```
 
-### Creating a Package
+> **Smart Visual Previews**: Static image themes generate a lossless `preview.png`, while animated splashes generate a fluid `preview.gif`. The GUI Package Inspector plays these previews in real-time with automatic aspect-ratio preservation and zero flicker.
 
-After building your splash, the script automatically offers to export it:
+#### Creating a Package (.xbs)
+- **In GUI Studio**: Click **Export .xbs Package...**
+- **In CLI Builder**:
+  ```bash
+  ./CLI_src/build_anim.sh
+  # At the end, choose "Export as .xbs package"
+  # Output saved in packages/ directory
+  ```
 
-```bash
-./build_anim.sh
-# Follow the interactive prompts
-# At the end, choose "Export as .xbs package"
-```
-
-Or manually after a successful build:
-```bash
-# The package is created in packages/ directory
-ls packages/
-# Output: mytheme_drm_1920x1080.xbs
-```
-
-### Installing a Package
-
+#### Installing a Package (.xbs)
 Install a downloaded `.xbs` package without needing gcc, ImageMagick, or source files:
+- **In GUI Studio**: Open `File -> Inspect / Install .xbs Package...` and click **Install Bootsplash**.
+- **In CLI**:
+  ```bash
+  sudo ./CLI_src/build_anim.sh --install-package packages/theme_drm_1920x1080.xbs
+  ```
 
-```bash
-sudo ./build_anim.sh --install-package theme_drm_1920x1080.xbs
+### 2. Native Debian Package (.deb)
+
+xbootsplash can generate fully compliant `.deb` packages for Debian, Ubuntu, Linux Mint, Q4OS, and all Debian-derived distributions:
+
+```
+xbs-mytheme_1.0_amd64.deb
+├── debian-binary              # Package format version (2.0)
+├── control.tar.gz             # Package metadata, architecture, dependencies
+└── data.tar.gz
+    ├── /usr/bin/xbs_mytheme                          # Pre-compiled bootsplash binary
+    ├── /etc/initramfs-tools/hooks/xbs_mytheme        # Initramfs hook (copies binary to initrd)
+    ├── /etc/initramfs-tools/scripts/init-top/xbs_mytheme # Early-boot launch script
+    └── /usr/share/doc/xbs-mytheme/copyright
 ```
 
-The installer will:
-1. Extract and verify the package
-2. Check SHA256 integrity
-3. Verify backend compatibility (drm/fbdev)
-4. Prompt for installation type (boot/shutdown/both)
+#### Exporting a `.deb`
+- **From GUI Menu**: Select **Tools &rarr; Build Debian Package (.deb)...**
+- **From Package Inspector**: Open any `.xbs` package and click the **Export as .deb...** button.
+
+#### Installing and Removing `.deb` Packages
+Debian packages integrate natively with `apt` and `dpkg`. Maintainer scripts (`postinst` and `prerm`) automatically invoke `update-initramfs -u`:
+
+```bash
+# Install package and rebuild initramfs automatically
+sudo apt install ./xbs-mytheme_1.0_amd64.deb
+
+# Remove bootsplash and restore default boot cleanly
+sudo apt remove xbs-mytheme
+```
 
 ### Package Metadata
 
@@ -146,7 +173,8 @@ Packages follow the format: `<name>_<backend>_<resolution>.xbs`
 
 Examples:
 - `win11_drm_1920x1080.xbs` - Windows 11 style, DRM backend, 1080p
-- `tux_fbdev_800x600.xbs` - Tux logo, fbdev backend, 600p
+- `amiga_fbdev_1920x1080.xbs` - Amiga Workbench style, fbdev backend, 1080p
+- `fox_fbdev_1920x1080.xbs` - Minimalist running fox, fbdev backend, 1080p
 
 ## Display Modes
 
@@ -266,6 +294,56 @@ Mode 4: Static image full screen
 
 ```
 
+### Resolution Handling & Screen Size Discrepancies
+
+A common operational question is: **what happens if a binary is compiled for a specific resolution (e.g. 1920x1080) but executed on a display with a different native resolution (e.g. 1024x768, 2560x1440, 4K, or vice versa)?**
+
+#### Core Philosophy: Zero Runtime Dynamic Scaling
+To guarantee instantaneous startup and maintain a freestanding binary with zero libc dependencies, **`xbootsplash` never performs real-time software bicubic or bilinear image scaling on the CPU**. Applying software interpolation on every frame at 60 FPS in early kernel boot would introduce measurable CPU overhead and delay desktop handoff.
+
+Instead:
+1. **Dynamic Hardware Query**: At boot time, `xbootsplash` queries the exact active screen resolution directly from the display hardware (`ioctl(FBIOGET_VSCREENINFO)` under fbdev, or KMS connector modes under DRM).
+2. **1:1 Native Pixel Ratio**: Pixels are rendered at native 1:1 scale without blurring or geometric distortion.
+3. **Hardware Boundary Clipping**: Low-level blitters (`blit_to_fb_32bpp`, `blit_frame_dblbuf`) enforce strict bounding guards on all four borders ($x < 0$, $y < 0$, $x + w > \text{xres}$, $y + h > \text{yres}$), preventing buffer overflows and crashes under any resolution mismatch.
+
+#### Behavior by Display Mode
+
+##### 1. Mode 0: Animation on Solid Background (e.g., Blackhole)
+* **Visual Result**: **Flawless on all displays.**
+* **Centering**: The animation origin is calculated dynamically at runtime relative to the active display:
+  $$x = \frac{\text{xres} - \text{FRAME\_W}}{2} + \text{offset\_x}, \quad y = \frac{\text{yres} - \text{FRAME\_H}}{2} + \text{offset\_y}$$
+* **Background**: The solid background color (`#RRGGBB`) automatically fills 100% of the screen, whether running on 800x600, 1080p, 1440p, or 4K.
+* **Deformation**: **None.** The animation remains sharp, unstretched, and perfectly centered.
+
+##### 2. Mode 1: Animation on Background Image (e.g., Amiga)
+* **Visual Result**: **Seamless integration** when matching background margin colors.
+* **Centering**: Both the background graphic and the animation frames are centered dynamically against the active screen dimensions.
+* **If Native Screen > Background Image**: The background graphic rests in the center, and outer borders are filled with `BACKGROUND_COLOR`. If the background color matches the perimeter of your artwork, the transition is invisible.
+* **If Native Screen < Background Image**: The artwork is clipped at the screen perimeter without crashing.
+
+##### 3. Mode 2 (Fullscreen Background) & Modes 3/4 (Fullscreen Static Image)
+In these modes, the artwork is prepared to `target_resolution` at compile time.
+* **Compiled Resolution < Native Screen (e.g., 1280x720 binary on a 1920x1080 monitor)**:
+  * **No distortion or stretching blur**: Pixels remain 1:1.
+  * The image occupies its original dimensions ($1280 \times 720$), and the remaining horizontal and vertical borders display the configured `BACKGROUND_COLOR` (letterbox / pillarbox margins).
+* **Compiled Resolution > Native Screen (e.g., 1920x1080 binary on a 1024x768 monitor)**:
+  * **No crash or memory corruption**: Boundary clipping prevents out-of-bounds writes.
+  * **Cropped**: The right and bottom regions of the image that exceed 1024x768 fall outside the viewport and are clipped.
+
+#### Hibernation Resume Notification Banner
+The *"Resume from hibernation..."* status banner is dynamically centered horizontally using the live screen width:
+$$\text{banner\_x} = \frac{\text{xres} - \text{BANNER\_W}}{2}$$
+It is therefore **always centered at the top of the physical screen**, regardless of the compile-time target resolution.
+
+#### Summary Comparison Table
+
+| Display Mode | Native Screen vs Compiled Target | Deformation / Blur? | Crash / Buffer Overflow? | Visual Output |
+| :--- | :--- | :---: | :---: | :--- |
+| **Mode 0 (Solid BG)** | Any resolution difference | **No** | **No** | **Perfect**: Auto-centered, solid color fills screen |
+| **Mode 1 (Centered BG)** | Any resolution difference | **No** | **No** | **Seamless**: Auto-centered, solid margins fill remaining space |
+| **Mode 2/4 (Fullscreen)** | Native screen **> compiled** | **No** | **No** | 1:1 image with solid letterbox/pillarbox borders |
+| **Mode 2/4 (Fullscreen)** | Native screen **< compiled** | **No** | **No** | Image safely cropped at right/bottom edges |
+
 ## Binary
 
 - **Output**: `xbootsplash` (13 KB - 4 MB depending on mode and content)
@@ -305,25 +383,61 @@ frames_delta.h                   xbootsplash
 
 ```
 xbootsplash/
-├── README.md               # This file
-├── HOW_TO_INSTALL.md       # Installation guide
-├── Makefile                # Build system (fbdev/DRM targets)
-├── nolibc.h                # Syscall wrappers (freestanding libc, fbdev only)
-├── start.S                 # Startup assembly (_start entry point, fbdev only)
-├── linker.ld               # Custom linker script (minimal ELF, fbdev only)
-├── splash_anim_delta.c     # fbdev program (multi-mode animation)
-├── splash_anim_drm.c       # DRM/KMS program (dumb buffer rendering)
-├── generate_splash.c       # Generator tool (PNG → compressed C header)
-├── extract_frames.c         # Extraction tool (binary → PNG frames)
-└── build_anim.sh           # Interactive builder + installer script
+├── README.md               # Main documentation
+├── Makefile                # Root build system
+├── engine_src/             # Standalone C engine & compiler
+│   ├── splash_anim_delta.c # Freestanding fbdev runtime engine
+│   ├── splash_anim_drm.c   # Freestanding DRM/KMS runtime engine
+│   ├── generate_splash.c   # Generator tool (PNG → compressed C header)
+│   ├── nolibc.h            # Syscall wrappers (freestanding libc)
+│   ├── start.S             # Minimal startup assembly (_start)
+│   └── linker.ld           # Custom linker script
+├── CLI_src/                # Interactive builder & extraction tools
+│   ├── build_anim.sh       # Interactive builder + installer script
+│   └── extract_frames.c    # Extraction tool (binary → PNG frames)
+├── GUI_src/                # Graphical Studio (Qt/TQt source, embedded runner & assets)
+├── zx0/                    # ZX0 compressor (C) & zero-libc freestanding decompressor
+├── upkr/                   # UPKR compressor (C) & zero-libc freestanding decompressor
+├── datas/                  # Library of 50+ sample animation frame sequences (PNG)
+├── gif_previews/           # Animated GIF previews of sample themes
+├── packages/               # Ready-to-install boot splash packages (.xbs)
+├── projects/               # Pre-configured Studio project profiles (.xbsp)
+├── docs/                   # Detailed guides & specifications
+│   ├── HOW_TO_INSTALL.md   # Installation guide
+│   └── COMPRESSION_FORMAT.md # Compression formats documentation
+└── tests/                  # Automated test, benchmark & QEMU sandbox scripts
+    ├── bench_compression.c # Compression ratio & throughput benchmark suite
+    ├── test.sh             # Mode verification script
+    └── test_qemu.sh        # Isolated QEMU/KVM sandbox runner
 ```
 
 ## Quick Start
 
-### Interactive Build (Recommended)
+### Graphical Studio (xbootsplash-gui)
+
+For an interactive visual workflow with real-time positioning, eyedropper color selection, theme browsing, live hardware preview, and 1-click `.deb` package generation:
 
 ```bash
-./build_anim.sh
+# Build the GUI (one-time setup)
+./GUI_src/build.sh
+
+# Launch the visual studio
+./GUI_src/build/xbootsplash-gui
+```
+
+Key Studio Features:
+- **Interactive Canvas**: Real-time virtual composite preview with zoom, center crosshair guides, and playback controls.
+- **Eyedropper Tool**: Sample exact RGB565 / hex colors directly from images or anywhere on your screen.
+- **Package Inspector**: Visually browse `.xbs` packages with fluid uncropped 16:9 animated preview, inspect specs, install directly, or export to `.deb`.
+- **Debian (.deb) Generator**: Export production-ready `.deb` packages with automatic initramfs update hooks.
+- **Super-Pack Selector**: Choose between standard, ZX0, or UPKR compression for up to -65% binary size.
+- **[▶ Test Live] (F6)**: Test your bootsplash on the physical screen without rebooting!
+- **100% Autonomous Portable Executable**: The entire engine build toolchain (generator, freestanding nolibc runtime, linker script, ZX0 & UPKR compressors, and Makefile) is super-compressed into the GUI binary (~68 KB payload). Compilations occur purely in volatile RAM (`/run/user/<uid>/` tmpfs) with automatic cleanup—run `xbootsplash-gui` anywhere with zero Git repository dependency.
+
+### Interactive CLI Build (Terminal)
+
+```bash
+./CLI_src/build_anim.sh
 ```
 
 Follow the prompts to:
@@ -332,24 +446,63 @@ Follow the prompts to:
 3. Choose compression method
 4. Build and test
 
-### Command Line
+### Command Line Examples
 
 ```bash
 # Animation on black background (default)
-./build_anim.sh -m 0 -y 80 my_frames/
+./CLI_src/build_anim.sh -m 0 -y 80 my_frames/
 
 # Animation with custom background color
-./build_anim.sh -m 0 -c 1a1a2e -y 100 my_frames/
+./CLI_src/build_anim.sh -m 0 -c 1a1a2e -y 100 my_frames/
 
 # Animation on background image
-./build_anim.sh -m 1 -b wallpaper.png -r 1920x1080 my_frames/
+./CLI_src/build_anim.sh -m 1 -b wallpaper.png -r 1920x1080 my_frames/
 
 # Static logo on colored background
-./build_anim.sh -m 2 -c 0d1117 logo.png
+./CLI_src/build_anim.sh -m 2 -c 0d1117 logo.png
 
 # Full screen static image
-./build_anim.sh -m 3 -r 1920x1080 wallpaper.png
+./CLI_src/build_anim.sh -m 3 -r 1920x1080 wallpaper.png
+
+# Animation with ZX0 super-compression (ultra-compact binary)
+./CLI_src/build_anim.sh -m 0 -Z my_frames/
 ```
+
+## Included Themes, Projects & Animation Library
+
+The repository includes a comprehensive set of ready-to-use animations, project profiles, and pre-compiled packages:
+
+### 1. Animation Sequences (`datas/`)
+Over 50 ready-to-build animation sequences (lossless PNG frames) curated for boot screens:
+- **Retro Gaming & Computing**: `amiga`, `atari`, `neogeo`, `sega`, `msx`, `pong`, `pacman`
+- **Sci-Fi & Cyberpunk**: `fallout`, `blackhole`, `eventhorizon`, `skynet`, `knightrider`, `sauron`, `scifi`, `rog`
+- **Operating Systems**: `q4os`, `win95`, `win7`, `win10`, `win11`, `android`, `tdealien`
+- **Modern Geometry & Minimal Loaders**: `fox`, `redsphere`, `cube3dcolors`, `diamond`, `racing`, `structure`, `infinite`, `rider`, `hexa`, `dots`, `spinner1`–`spinner5`, `loadingcircle`...
+
+You can use these directly as frame sources in the CLI builder:
+```bash
+./CLI_src/build_anim.sh -m 0 datas/fox/
+```
+Or import them into GUI Studio by dragging or selecting the folder.
+
+### 2. Studio Project Profiles (`projects/`)
+Pre-tuned `.xbsp` project configuration files for XBootsplash Studio (`xbootsplash-gui`):
+- Double-click or load via **File &rarr; Open Project...** (`Ctrl+O`).
+- Instantly loads resolution, background color, centered/custom offsets, playback speed, and frame delays.
+- Allows 1-click recompilation, live hardware testing, and `.deb` packaging.
+
+### 3. Pre-Compiled Packages (`packages/`)
+Over 30 ready-to-install `.xbs` theme packages containing pre-compiled binaries and embedded visual previews:
+- **Inspect visually**: Open **File &rarr; Inspect / Install .xbs Package...** in GUI Studio to see the animated preview playing in real-time.
+- **Hardware Test**: Click **Test Live on Hardware** to view the theme directly on your physical monitor without rebooting.
+- **Debian Conversion**: Click **Export as .deb...** to turn any `.xbs` into an installable Debian package.
+- **CLI Installation**:
+  ```bash
+  sudo ./CLI_src/build_anim.sh --install-package packages/amiga_fbdev_1920x1080.xbs
+  ```
+
+### 4. Animated GIF Previews (`gif_previews/`)
+A collection of standalone animated GIFs showing the sample themes in action (`xbs_amiga_preview.gif`, `xbs_fallout_preview.gif`, `xbs_fox_preview.gif`, `xbs_redsphere_preview.gif`, `xbs_win95_preview.gif`, etc.). These provide an immediate visual preview in file managers, image viewers, and web browsers without needing to launch the studio or boot the system.
 
 ## Design Decisions
 
@@ -421,6 +574,65 @@ Memory: frame_buffer[W×H×2] (allocated via mmap)
 
 ## Compression Methods
 
+### Compression Modes: Normal vs Super-Packing (ZX0 & UPKR)
+
+xbootsplash provides three compression tiers, selectable in the GUI Studio ("Enable maximum compression" dropdown) or via CLI flags:
+
+| Mode | Compression Algorithm | Entropy / Match Model | Decompression Speed | Binary Footprint Gain | Typical Boot RAM |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Normal** *(default)* | RLE XOR / Palette LZSS | Run-length + 4 KB sliding window | **Instant** (direct blit) | Baseline (60–85 KB) | **0 KB** (direct streaming) |
+| **ZX0 Super-pack** | Optimal LZ77 + Elias-gamma | Backwards match + bitstream Elias-gamma | **> 340 MB/s** (~2–20 µs/frame) | **20% to 50% smaller** | ~50 to 300 KB temporary buffer |
+| **UPKR Super-pack** | Optimal LZ77 + Adaptive rANS | Asymmetric Numeral Systems (rANS) entropy | **> 120 MB/s** (~15–80 µs/frame) | **30% to 65% smaller** (*-15% to -25% vs ZX0*) | ~50 to 300 KB temporary buffer |
+
+#### Why UPKR Achieves Maximum Compression
+While ZX0 encodes match lengths and offsets using static Elias-gamma bit prefixes, **UPKR** couples optimal LZ77 parse trees with an **adaptive rANS (Asymmetric Numeral Systems)** entropy coder. As the stream is parsed, symbol probability tables continuously adapt to the local distribution of XOR deltas and zero-runs, squeezing an extra **15% to 25% out of streams that are already heavily compressed by ZX0**.
+
+#### Benchmark on Real-World Boot Splash Themes
+
+Compression benchmark conducted on 1080p (1920x1080) themes comparing raw frame buffers, RLE XOR baseline, ZX0, and UPKR:
+
+| Theme | Frames | Uncompressed (Raw 1080p) | RLE XOR Baseline | ZX0 Super-pack | UPKR Super-pack | Net Gain vs ZX0 |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **amiga** (Workbench 3.1) | 32 | 132.7 MB | 500 KB | 332 KB | **272 KB** | **-18.1%** |
+| **fox** (Running Fox) | 15 | 62.2 MB | 87 KB | 58 KB | **47 KB** | **-18.9%** |
+| **fallout** (Vault Boy Pip-Boy) | 48 | 199.1 MB | 3.4 MB | 1.8 MB | **1.5 MB** | **-16.7%** |
+| **redsphere** (3D Raytraced Sphere) | 30 | 124.4 MB | 162 KB | 79 KB | **66 KB** | **-16.5%** |
+| **pacman** (Retro Arcade) | 30 | 124.4 MB | 1.1 MB | 620 KB | **512 KB** | **-17.4%** |
+
+- **Zero-Libc Freestanding Decompressors**: Both the ZX0 unpacker (`zx0/zx0_decompress.c`) and UPKR unpacker (`upkr/upkr_decompress.c`) are written in 100% freestanding C without any libc or dynamic allocator (`malloc`) dependency. They decompress directly into temporary anonymous `mmap` RAM at boot time.
+- **Decompression Budget**: At 30–60 FPS, a single frame budget is 16.6 to 33.3 milliseconds. Decoding a UPKR frame takes between 15 and 80 microseconds, utilizing **less than 0.3% of the available frame time budget**.
+
+### The Compression Ouroboros: 4 Levels of Recursive Packing
+
+An architectural hallmark of xbootsplash is its self-referential "Ouroboros" compression pipeline, recursively nesting compression algorithms across four lifecycle stages:
+
+```text
+[Level 1 : GUI Build Time (CMake)]
+   CMake uses the compiled ZX0 host tool (pack_engine)
+   to pack and compress the entire engine... including the ZX0 and UPKR C sources!
+        ↓
+[Level 2 : GUI Runtime (Click on "Build")]
+   The standalone GUI binary uses its embedded C++ decompressor
+   to extract into volatile RAM (tmpfs) the C sources of both ZX0 and UPKR compressors!
+        ↓
+[Level 3 : Splash Payload Generation]
+   The ephemeral generator compiles and runs the chosen compressor (ZX0 or UPKR)
+   to super-pack the animation frames and delta stream into frames_delta.h!
+        ↓
+[Level 4 : Linux Kernel Boot Time]
+   The resulting minimal freestanding binary (xbootsplash) executes
+   the matching zero-libc decompressor in nolibc to unpack frames in real time on the framebuffer!
+```
+
+| Lifecycle Level | Role | Mechanism | Memory Footprint / Performance |
+| :--- | :--- | :--- | :--- |
+| **Level 1** (CMake) | Pack engine sources | `pack_engine` with `zx0_compress_custom()` | Raw: 275.4 KB → ZX0: **74.1 KB** (**26.9%** ratio) |
+| **Level 2** (GUI RAM) | Deploy build environment | `EmbeddedEngineExtractor` with `zx0_decompress_to()` | **< 2 ms** extraction to `/run/user/<uid>/` tmpfs |
+| **Level 3** (Generator) | Super-pack frames & deltas | `generate_splash` with embedded ZX0 / UPKR | **20% to 65%** size reduction on animation streams |
+| **Level 4** (Boot Time) | Stream display at kernel boot | Freestanding `zx0_decompress.c` or `upkr_decompress.c` | **> 120–340 MB/s** decode rate, 0 libc dependency |
+
+### Delta Compression Algorithms (Animations)
+
 | Method | Best For | Description |
 |--------|----------|-------------|
 | **RLE XOR** | Moderate changes | RLE on XOR deltas between frames |
@@ -428,7 +640,7 @@ Memory: frame_buffer[W×H×2] (allocated via mmap)
 | **Sparse XOR** | Minimal changes | Position + value for changed pixels only |
 | **Raw** | Fastest decode | No compression, fastest runtime |
 
-The benchmark tool automatically recommends the best method for your frames.
+The generator automatically analyzes each frame and selects the optimal delta strategy. When Super-packing (ZX0 or UPKR) is enabled, the resulting optimal delta stream is further compressed into a single unified stream.
 
 ## RLE Format
 
@@ -514,7 +726,7 @@ mkdir my_frames
 # Add files: anim_001.png, anim_002.png, ... or frame_00.png, ...
 
 # Build interactively
-./build_anim.sh my_frames
+./CLI_src/build_anim.sh my_frames
 ```
 
 The generator automatically:
@@ -527,10 +739,10 @@ The generator automatically:
 
 ```bash
 # Mode 3: Static logo on colored background
-./build_anim.sh -m 3 -c 0d1117 logo.png
+./CLI_src/build_anim.sh -m 3 -c 0d1117 logo.png
 
 # Mode 4: Full screen wallpaper (auto-resize to 1920x1080)
-./build_anim.sh -m 4 -r 1920x1080 wallpaper.png
+./CLI_src/build_anim.sh -m 4 -r 1920x1080 wallpaper.png
 ```
 
 ### Parameters
@@ -565,15 +777,17 @@ The generator creates `frames_delta.h` with:
 #define BG_H 1080
 ```
 
-## Compression Results
+## Compression Results & Benchmarks
 
-Example with 115 frames (Windows 10 spinner, 64x64):
+Real-world size comparisons between Normal Mode and ZX0 Super-Compression:
 
-| Metric | Value |
-|--------|-------|
-| Raw RGB565 | 920 KB |
-| **Delta RLE** | **74 KB** |
-| **Compression** | **12.44x** |
+| Test Set | Asset / Binary Type | Normal Size (without ZX0) | ZX0 Size (with `-Z`) | Size Reduction / Gain |
+| :--- | :--- | :--- | :--- | :--- |
+| **Win10 Spinner** (115 frames) | Standalone DRM Binary | **80,568 bytes** (78 KB) | **35,432 bytes** (34 KB) | **-56%** *(Binary divided by 2.3x!)* |
+| **Win10 Spinner** (115 frames) | Standalone fbdev Binary | **74,200 bytes** (72 KB) | **29,000 bytes** (28 KB) | **-61%** *(Binary divided by 2.5x!)* |
+| **Amiga Floppy** (32 frames, 397x427) | Animation Delta Stream | **1,293,121 bytes** (1.26 MB) | **259,249 bytes** (253 KB) | **-80%** (**1,033,872 bytes saved!**) |
+| **Atari Logo** (214x77) | Static Image (Palette) | **8,408 bytes** | **6,714 bytes** | **-20.1%** |
+| **Progress-0** (64x64) | Static Image (Palette) | **582 bytes** | **198 bytes** | **-66.0%** |
 
 ## Binary Extraction
 
@@ -585,6 +799,9 @@ xbootsplash includes a tool to extract frames and images from compiled `xbs_*` b
 ### Using the Extraction Tool
 
 ```bash
+# Build the extraction tool
+make extract_frames
+
 # Extract from a binary
 ./extract_frames xbs_mytheme mytheme_extracted/
 
@@ -604,7 +821,7 @@ mytheme_extracted/
 Use option 3 in the main menu:
 
 ```bash
-./build_anim.sh
+./CLI_src/build_anim.sh
 # Select: 3) Extract xbs_* binary
 ```
 
@@ -673,13 +890,13 @@ static inline long syscall1(long n, long a1) {
 The `build_anim.sh` script includes built-in installation:
 
 ```bash
-./build_anim.sh
+./CLI_src/build_anim.sh
 # Follow prompts through build → test → install
 ```
 
 Or install directly:
 ```bash
-sudo ./build_anim.sh --install
+sudo ./CLI_src/build_anim.sh --install
 ```
 
 ### Installation Methods
@@ -713,7 +930,7 @@ sudo update-grub
 
 Or use the built-in uninstaller:
 ```bash
-sudo ./build_anim.sh --uninstall-only
+sudo ./CLI_src/build_anim.sh --uninstall-only
 ```
 
 ### Restore Previous Version
@@ -788,7 +1005,7 @@ If xbootsplash causes boot failure (black screen, freeze, or kernel panic):
 | Pixel-by-pixel conversion | CPU usage on high-res | Fixed: SSE2 SIMD optimization |
 | Infinite loop | Process persists if PID lost | Fixed: SIGTERM/SIGINT handling |
 
-See `HOW_TO_INSTALL.md` for detailed instructions.
+See `docs/HOW_TO_INSTALL.md` for detailed instructions.
 
 ## Supported Resolutions
 
@@ -991,16 +1208,18 @@ If `/dev/fb0` is missing on a DRM system:
 | Animation complete (no loop) | Stay on last frame, wait for signal |
 | Full loop enabled | Restart from frame 0 |
 | Partial loop enabled | Restart from LOOP_START frame |
+| Ping-pong loop enabled | Play smoothly forward then backward (0→N→1→0...) |
 
 ## Loop Modes
 
-xbootsplash supports 3 loop modes for animations:
+xbootsplash supports 4 loop modes for animations:
 
 | Mode | Behavior | Use Case |
 |------|----------|----------|
-| **No loop** | Play once, stay on last frame | Intro animation, boot complete indicator |
-| **Full loop** | Play 0→N, restart from 0 | Continuous animation |
-| **Partial loop** | Play 0→N once, then loop from frame X to N | Intro + seamless loop |
+| **No loop** (`0`) | Play once, stay on last frame | Intro animation, boot complete indicator |
+| **Full loop** (`1`) | Play 0→N, restart from 0 | Continuous animation |
+| **Partial loop** (`2`) | Play 0→N once, then loop from frame X to N | Intro + seamless loop |
+| **Ping-Pong** (`3`) | Play forward (0→N-1), then smoothly reverse (N-2→1) | Pendulum, breathing, bouncing, oscillating effects |
 
 **Partial loop example** (11 frames, loop from frame 7):
 ```
@@ -1009,7 +1228,13 @@ Then loop:                     ↑←←←←←←←←←←←←←←←�
              7 → 8 → 9 → 10 → 7 → 8 → 9 → 10 → ...
 ```
 
-This is useful for animations with an "intro" phase followed by a seamless loop.
+**Ping-Pong loop example** (5 frames, indices 0..4):
+```
+Sequence:    0 → 1 → 2 → 3 → 4 → 3 → 2 → 1 → [loops back to 0]
+```
+
+> [!TIP]
+> In Ping-Pong mode, turning point frames (`0` and `N-1`) are never repeated consecutively, ensuring consistent, fluid frame pacing without visual freeze or stutter. Furthermore, the symmetrical frame deltas compress with exceptional ratios under ZX0 super-compression!
 
 ### Error Conditions
 
@@ -1037,15 +1262,102 @@ This is useful for animations with an "intro" phase followed by a seamless loop.
 | Sparse XOR overflow (>65535 pixels) | Method skipped in auto-selection | Use RLE XOR instead |
 | Very long `/proc/cmdline` | Handled (4096 byte buffer) | No issue |
 
+## Live Hardware VT Testing Architecture
+
+### The Problem: Why Live Hardware Testing?
+
+Historically, developing and testing a custom boot splash under Linux has been tedious and fraught with risks:
+
+1. **Blind Rebooting**: Validating changes required regenerating the initramfs (`update-initramfs -u`, `dracut --force`, or `mkinitcpio -P`) and rebooting the entire host machine. If an image offset was wrong, a background color mismatched, or the binary crashed, you had to reboot repeatedly. A severe crash could even leave early boot hanging.
+2. **QEMU / Virtual Machine Discrepancies**: Testing inside a VM or emulator cannot accurately reproduce bare-metal GPU driver behaviors, physical display panel timings, native EDID resolutions, or kernel framebuffer emulation idiosyncrasies (such as Intel `i915drmfb`, `amdgpu`, or `nouveau`).
+3. **Desktop Session Conflicts**: Attempting to write directly to `/dev/fb0` or claiming DRM master privileges (`DRM_IOCTL_SET_MASTER`) from inside an active X11 or Wayland desktop either gets blocked by the display server or destroys active desktop windows with catastrophic graphical glitches.
+
+The **Live Hardware VT Preview** completely solves this workflow. With a single click (`[▶ Test Live]` or `F6`) in `xbootsplash-gui` or from the Package Inspector, physical screen control is temporarily delegated to the compiled bootsplash binary on a dedicated virtual console, running at full hardware refresh rate, before seamlessly and automatically returning to your unmodified desktop session within 10 seconds (or immediately upon pressing any key).
+
+```
+┌────────────────────────┐         ┌────────────────────────┐         ┌────────────────────────┐
+│     Active Desktop     │  ─────> │      Isolated VT       │  ─────> │     Active Desktop     │
+│     (X11 / Wayland)    │         │  (Direct FB/DRM Scan)  │         │  (Restored 1:1 State)  │
+└────────────────────────┘         └────────────────────────┘         └────────────────────────┘
+            │                                   │                                  ▲
+            │ 1. Query current VT (VT_GETSTATE) │ 3. Enter KD_GRAPHICS             │ 6. KD_TEXT & termios reset
+            │ 2. Allocate free VT (VT_OPENQRY)  │ 4. Direct evdev keyboard poll    │ 7. VT_ACTIVATE original VT
+            └─────────────────────────────────> │ 5. Execute bootsplash binary     │ 8. Unsilence klogctl
+                                                └──────────────────────────────────┘
+```
+
+---
+
+### Low-Level Mechanisms & Fail-Safe Guarantees
+
+The live hardware test is driven by an autonomous standalone runner (`xbs_vt_runner`), built around direct Linux kernel interfaces with zero tolerance for system lockouts:
+
+#### 1. Dynamic VT Query & Seamless Acquisition
+- **Origin VT Discovery**: The runner queries the console multiplexer `/dev/tty0` using `ioctl(tty0, VT_GETSTATE, &vts)`. This captures the exact virtual terminal hosting the user's active graphical session (e.g. VT 1 on systemd/GDM or VT 7 on legacy X11).
+- **Free VT Allocation**: Instead of hardcoding a virtual console, it queries the kernel for the next unused Virtual Terminal via `ioctl(tty0, VT_OPENQRY, &free_vt)` (typically allocating VT 12).
+- **Atomic Console Switch**: It opens `/dev/tty<free_vt>` and switches the physical display using `ioctl(tty0, VT_ACTIVATE, free_vt)` followed by `ioctl(tty0, VT_WAITACTIVE, free_vt)`.
+
+#### 2. Visual Console Isolation
+- **Graphics Mode Switch**: Transitions the target VT to graphics mode using `ioctl(vt_fd, KDSETMODE, KD_GRAPHICS)`. This immediately suppresses the blinking text cursor, disables kernel virtual terminal font rendering, and prevents console text artifacts from corrupting the display.
+- **Display Unblanking (DPMS)**: Invokes `TIOCLINUX` subcode 4 (`TIOCL_UNBLANKSCREEN`) to force the physical display controller out of power-saving sleep.
+- **Kernel Log Silencing**: Temporarily suppresses kernel console printk messages via `klogctl(6, NULL, 0)` (`SYSLOG_ACTION_CONSOLE_OFF`) so asynchronous dmesg warnings or device driver logs cannot draw over the bootsplash frames.
+
+#### 3. Direct Hardware Event Monitoring (`evdev`)
+- In `KD_GRAPHICS` mode, standard tty input processing (termios line discipline, `stdin`) is disabled by the Linux kernel, meaning the runner process cannot receive regular keyboard characters via standard input.
+- To ensure the user can instantly exit the preview at any moment, the runner scans `/dev/input/event*` devices, inspects hardware capabilities via `ioctl(fd, EVIOCGBIT(0), evbit)` to identify all physical keyboards (`EV_KEY`), and monitors them non-blocking with `poll()`.
+- Pressing **any key** (e.g. Esc, Space, Enter, or any alphanumeric key) immediately breaks the event loop and initiates instantaneous desktop restoration.
+
+#### 4. Dual Safety Nets & Async-Signal-Safe Emergency Recovery
+- **Dedicated Alternate Signal Stack (`sigaltstack`)**: Allocates a dedicated 64 KB memory arena (`SS_ONSTACK`) for signal execution. If the child process crashes, or if stack overflow or memory exhaustion occurs, signal handlers are guaranteed to execute without hitting stack boundaries.
+- **Direct Kernel Syscall Emergency Handler**: Catches all critical termination and fault signals (`SIGSEGV`, `SIGABRT`, `SIGBUS`, `SIGILL`, `SIGFPE`, `SIGTERM`, `SIGINT`, `SIGQUIT`, `SIGALRM`). Standard C library functions (`printf`, `malloc`, `exit`) are not async-signal-safe and can deadlock if heap state is poisoned. The emergency recovery handler relies **strictly on raw direct Linux syscalls**:
+  ```c
+  /* Emergency async-signal-safe recovery */
+  syscall(SYS_kill, g_child_pid, SIGKILL);
+  syscall(SYS_ioctl, g_test_tty_fd, KDSETMODE, KD_TEXT);
+  syscall(SYS_ioctl, g_tty0_fd, VT_ACTIVATE, g_original_vt);
+  _exit(4);
+  ```
+- **Hardware Watchdog Timer**: Arms a kernel alarm timer (`alarm(duration + 2)`) *before* initiating `VT_ACTIVATE`. Even if an unexpected kernel freeze or deadlock were to occur inside VT switching ioctls, the hardware timer forces a `SIGALRM` and recovers the session.
+- **Atomic Single-Execution Lock**: Guarded by `__atomic_test_and_set(&g_vt_restored, __ATOMIC_SEQ_CST)`, ensuring the cleanup sequence executes exactly once regardless of concurrency between timer expiration, keyboard events, or signals.
+
+#### 5. Complete Desktop Environment Restoration
+When the preview concludes (via duration timeout, keypress, or signal), the restoration routine performs full cleanup:
+1. Sends `SIGTERM` to the splash process, allowing 300ms for graceful cleanup before escalating to `SIGKILL`.
+2. Closes all open evdev keyboard file descriptors.
+3. Restores console text mode: `ioctl(vt_fd, KDSETMODE, KD_TEXT)`.
+4. Restores keyboard translation: `ioctl(vt_fd, KDSKBMODE, K_XLATE)`.
+5. Restores canonical termios flags (`ICANON`, `ECHO`, `ISIG`, `CS8`, etc.).
+6. Emits the ANSI hardware terminal reset sequence (`\033c`) to reset terminal fonts and clear display state.
+7. Re-enables kernel console logging: `klogctl(7, NULL, 0)`.
+8. Reactivates and waits for the original desktop virtual terminal: `ioctl(tty0, VT_ACTIVATE, orig_vt)` and `ioctl(tty0, VT_WAITACTIVE, orig_vt)`.
+
+#### 6. 100% Self-Contained In-Memory Deployment
+To keep `xbootsplash-gui` completely standalone:
+- The compiled C runner (`xbs_vt_runner`, stripped down to ~9.8 KB) is converted at build time into a C byte array (`embedded_vt_runner.h`) via `xxd -i` and embedded directly in the `xbootsplash-gui` binary rodata.
+- At runtime, the GUI extracts the runner on-the-fly into volatile RAM `tmpfs` (`/run/user/<uid>/xbs_vt_runner`), verifies its byte length, marks it executable (`0755`), and invokes it with `sudo`.
+- No companion binaries or helper scripts need to be distributed, installed, or kept on disk.
+
+#### 7. DRM fbdev Shadow Buffer Flushing (`FBIOPAN_DISPLAY`)
+On modern Linux DRM drivers operating in fbdev emulation (such as `i915drmfb` on Intel GPUs), the kernel maintains an in-memory shadow buffer. In single-buffer mode (`!fb_has_dblbuf`), writing pixels directly to mmap'd framebuffer memory does not trigger an immediate hardware scanout update without explicit display panning.
+By invoking `ioctl(fb_fd, FBIOPAN_DISPLAY, &fb_vinfo)` on every rendered frame, `xbootsplash` forces the DRM subsystem to flush dirty memory to the display controller, ensuring seamless 60 FPS playback on all DRM fbdev emulations without frame freezing.
+
 ## Initramfs Integration Guide
 
 ### initramfs-tools (Debian/Ubuntu)
 
-**Standard Installation** (recommended):
+**Recommended: Native Debian Package**
 ```bash
-sudo ./build_anim.sh
-# Select "Install" → "Standard (initramfs-tools)"
+sudo apt install ./xbs-mytheme_1.0_amd64.deb
+# Automatically registers hooks and runs update-initramfs -u
 ```
+
+**Alternative: GUI Studio or CLI Builder**
+- In GUI Studio: Click **Install Bootsplash** in the Package Inspector.
+- In CLI:
+  ```bash
+  sudo ./CLI_src/build_anim.sh
+  # Select "Install" → "Standard (initramfs-tools)"
+  ```
 
 **How it works:**
 - Binary installed to `/sbin/xbs_name`
@@ -1235,3 +1547,45 @@ exec switch_root /root /sbin/init
 | **cleanup** | dracut equivalent | Same as init-bottom |
 
 **Important**: Always stop the splash before `switch_root` or the process will be killed uncleanly.
+
+## Future Roadmap: Pre-compiled ELF Stubs (Zero-Compiler Generation)
+
+Currently, creating an `xbootsplash` binary invokes `gcc` to compile the runtime engine (`splash_anim_delta.c` or `splash_anim_drm.c`) together with the generated payload header (`frames_delta.h`).
+
+However, the executable machine code itself (direct kernel syscalls, framebuffer discovery and mmap, SSE2 blitter, 60 FPS animation loop, and ZX0/LZSS decompression engine) is completely static and identical across all themes. Only the data payload (compressed frames/deltas) and theme configuration metadata (dimensions, display mode, loop mode, frame delay) change.
+
+A planned future evolution is to offer **pre-compiled ELF stub injection** (similar to the stub-based architecture utilized in ELF packers like [zELF](https://github.com/seb3773)):
+
+- **Pre-compiled Stubs**: Ship minimal, pre-compiled template binaries (`xbs_stub_fbdev.bin` and `xbs_stub_drm.bin`, ~5–15 KB).
+- **Payload Patching**: Instead of invoking an external C compiler, the generator or GUI directly patches the pre-compiled ELF stub (by overwriting a reserved payload section or appending a new ELF section and updating the ELF headers).
+- **Key Advantages**:
+  1. **Zero Build Dependencies**: Users do not need `gcc`, `make`, `binutils`, or any C compiler toolchain installed on their system to generate custom bootsplashes.
+  2. **Instant Generation (< 10 ms)**: Splash binaries are produced almost instantaneously without compiler invocation overhead.
+  3. **Deterministic & Portable**: Guarantees identical, predictable machine binaries across all distributions regardless of local GCC versions or system libraries.
+  4. **Self-Contained GUI**: The GUI can generate final, production-ready boot executables natively out-of-the-box on systems lacking development packages.
+
+## Future Roadmap: Unified Hybrid Binary (Direct Kernel KMS + fbdev Fallback, Zero libdrm)
+
+Another planned architectural evolution is the creation of a **single, unified, freestanding hybrid binary**:
+
+- **DRM/KMS without `libdrm.so`**:
+  - Direct Rendering Manager (DRM) does not strictly require the userspace library `libdrm.so`.
+  - The necessary Linux DRM ioctls (`DRM_IOCTL_MODE_GETRESOURCES`, `DRM_IOCTL_MODE_GETCONNECTOR`, `DRM_IOCTL_MODE_CREATE_DUMB`, `DRM_IOCTL_MODE_MAP_DUMB`, `DRM_IOCTL_MODE_ADDFB`, `DRM_IOCTL_MODE_SETCRTC`, `DRM_IOCTL_MODE_PAGE_FLIP`) are part of the standard Linux kernel UAPI (`<drm/drm.h>` and `<drm/drm_mode.h>`).
+  - Because `xbootsplash` runs freestanding under `nolibc`, these ioctls can be invoked via direct raw kernel `ioctl()` syscalls without linking to `libdrm` or `libc`.
+
+- **Automatic Runtime Fallback (`/dev/dri/card0` → `/dev/fb0`)**:
+  - At startup, the unified binary attempts to open `/dev/dri/card0` and initialize native KMS with hardware page-flipping (tear-free VSync).
+  - If DRM initialization fails (e.g. at early boot in `initramfs` before `udev` has loaded the GPU driver, or on systems without DRM/KMS support), the binary instantly and seamlessly falls back to the Framebuffer `/dev/fb0`.
+
+- **Key Advantages**:
+  1. **Single Universal Binary**: One ~40 KB static executable for both early Boot (with automatic fallback) and late Shutdown (no risk of shared library unmount crashes).
+  2. **100% Freestanding & Static**: Zero external library dependencies (`libc`, `libdrm`), eliminating package management complexity.
+  3. **Best of Both Worlds**: Tear-free hardware VSync when KMS is ready, and guaranteed universal display compatibility everywhere else.
+
+## Credits & Acknowledgments
+
+- **Dennis Ranke** (exoticorn): Creator of the [UPKR compression format](https://github.com/exoticorn/upkr), providing state-of-the-art LZ+rANS compression ratios and lightweight decoding.
+- **Einar Saukas**: Creator of the [ZX0 compression format](https://github.com/einar-saukas/ZX0), enabling ultra-compact payloads with zero-allocation freestanding decompression.
+- **seb3773**: Project creator, architecture, freestanding engine, and XBootsplash Studio implementation ([https://github.com/seb3773](https://github.com/seb3773)).
+
+

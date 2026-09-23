@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=XBootsplash Studio
+GenericName=Linux Bootsplash Creator
+Comment=Create, preview, compile, and install Linux boot splashes
+Exec=/home/cdef/_PROJETS/bootsplash/GUI/build/xbootsplash-gui %u
+Icon=/home/cdef/_PROJETS/bootsplash/GUI/icons/xbootsplash.png
+Terminal=false
+Categories=System;Settings;Qt;TDE;
+StartupNotify=true

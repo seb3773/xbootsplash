@@ -1,0 +1,6 @@
+build/
+build-static/
+*.o
+*.moc
+moc_*.cpp
+xbs_vt_runner
